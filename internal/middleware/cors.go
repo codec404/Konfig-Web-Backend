@@ -1,11 +1,23 @@
 package middleware
 
-import "net/http"
+import (
+	"net/http"
+	"os"
+)
 
-// CORS wraps h and adds permissive CORS headers suitable for local development.
+// CORS handles cross-origin requests. Uses a specific allowed origin with
+// credentials support (required for httpOnly cookie auth).
 func CORS(h http.Handler) http.Handler {
+	appURL := os.Getenv("APP_URL")
+	if appURL == "" {
+		appURL = "http://localhost:5173"
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := r.Header.Get("Origin")
+		if origin == appURL {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 
