@@ -1,5 +1,5 @@
 # Build output
-server
+/server
 *.exe
 
 # Environment
