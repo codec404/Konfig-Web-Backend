@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"time"
 
@@ -151,17 +152,20 @@ func (h *AuthHandler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("code")
 	if code == "" {
+		log.Printf("GoogleCallback: missing code parameter")
 		http.Redirect(w, r, h.appURL+"/login?error=oauth_failed", http.StatusTemporaryRedirect)
 		return
 	}
 	token, err := h.oauthCfg.Exchange(context.Background(), code)
 	if err != nil {
+		log.Printf("GoogleCallback: token exchange failed: %v", err)
 		http.Redirect(w, r, h.appURL+"/login?error=oauth_failed", http.StatusTemporaryRedirect)
 		return
 	}
 	client := h.oauthCfg.Client(context.Background(), token)
 	resp, err := client.Get("https://www.googleapis.com/oauth2/v3/userinfo")
 	if err != nil || resp.StatusCode != http.StatusOK {
+		log.Printf("GoogleCallback: userinfo fetch failed: err=%v status=%v", err, resp.StatusCode)
 		http.Redirect(w, r, h.appURL+"/login?error=oauth_failed", http.StatusTemporaryRedirect)
 		return
 	}
@@ -173,17 +177,21 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 		Email string `json:"email"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		log.Printf("GoogleCallback: decode userinfo failed: %v", err)
 		http.Redirect(w, r, h.appURL+"/login?error=oauth_failed", http.StatusTemporaryRedirect)
 		return
 	}
 	user, err := h.store.UpsertGoogle(info.Sub, info.Name, info.Email)
 	if err != nil {
+		log.Printf("GoogleCallback: UpsertGoogle failed for %s: %v", info.Email, err)
 		http.Redirect(w, r, h.appURL+"/login?error=oauth_failed", http.StatusTemporaryRedirect)
 		return
 	}
 	if err := h.setSessionCookie(w, user); err != nil {
+		log.Printf("GoogleCallback: setSessionCookie failed: %v", err)
 		http.Redirect(w, r, h.appURL+"/login?error=oauth_failed", http.StatusTemporaryRedirect)
 		return
 	}
+	log.Printf("GoogleCallback: success for %s, redirecting to %s/", info.Email, h.appURL)
 	http.Redirect(w, r, h.appURL+"/", http.StatusTemporaryRedirect)
 }
