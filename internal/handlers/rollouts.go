@@ -158,11 +158,12 @@ func GetRolloutStatus(clients *grpcclient.Clients) http.HandlerFunc {
 	}
 }
 
-// Rollback handles POST /api/rollouts/:configId/rollback
+// Rollback handles POST /api/rollbacks
 func Rollback(clients *grpcclient.Clients) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			ServiceName string `json:"service_name"`
+			ConfigName  string `json:"config_name"`
 			ToVersion   int64  `json:"to_version"`
 		}
 
@@ -176,6 +177,7 @@ func Rollback(clients *grpcclient.Clients) http.HandlerFunc {
 
 		resp, err := clients.API.Rollback(ctx, &pb.RollbackRequest{
 			ServiceName:   body.ServiceName,
+			ConfigName:    body.ConfigName,
 			TargetVersion: body.ToVersion,
 		})
 		if err != nil {

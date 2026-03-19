@@ -68,7 +68,8 @@ func main() {
 
 	// Config routes
 	protected.HandleFunc("/api/services", handlers.ListServices(clients)).Methods(http.MethodGet)
-	protected.HandleFunc("/api/services/{serviceName}/configs", handlers.ListConfigs(clients)).Methods(http.MethodGet)
+	protected.HandleFunc("/api/services/{serviceName}/named-configs", handlers.ListNamedConfigs(clients)).Methods(http.MethodGet)
+	protected.HandleFunc("/api/services/{serviceName}/configs/{configName}/versions", handlers.ListConfigs(clients)).Methods(http.MethodGet)
 	protected.HandleFunc("/api/configs/{configId}", handlers.GetConfig(clients)).Methods(http.MethodGet)
 	protected.HandleFunc("/api/configs", handlers.UploadConfig(clients)).Methods(http.MethodPost)
 	protected.HandleFunc("/api/configs/{configId}", handlers.DeleteConfig(clients)).Methods(http.MethodDelete)
@@ -78,7 +79,7 @@ func main() {
 	protected.HandleFunc("/api/rollouts", handlers.StartRollout(clients)).Methods(http.MethodPost)
 	protected.HandleFunc("/api/rollouts/{configId}/status", handlers.GetRolloutStatus(clients)).Methods(http.MethodGet)
 	protected.HandleFunc("/api/rollouts/{configId}/promote", handlers.PromoteRollout(clients)).Methods(http.MethodPost)
-	protected.HandleFunc("/api/rollouts/{configId}/rollback", handlers.Rollback(clients)).Methods(http.MethodPost)
+	protected.HandleFunc("/api/rollbacks", handlers.Rollback(clients)).Methods(http.MethodPost)
 
 	// Validation routes
 	protected.HandleFunc("/api/validate", handlers.ValidateConfig(clients)).Methods(http.MethodPost)

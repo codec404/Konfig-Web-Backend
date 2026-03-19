@@ -16,6 +16,7 @@ import (
 type configDataResponse struct {
 	ConfigID    string `json:"config_id"`
 	ServiceName string `json:"service_name"`
+	ConfigName  string `json:"config_name"`
 	Version     int64  `json:"version"`
 	Content     string `json:"content"`
 	Format      string `json:"format"`
@@ -28,6 +29,7 @@ type configDataResponse struct {
 type configMetaResponse struct {
 	ConfigID    string `json:"config_id"`
 	ServiceName string `json:"service_name"`
+	ConfigName  string `json:"config_name"`
 	Version     int64  `json:"version"`
 	Format      string `json:"format"`
 	CreatedAt   string `json:"created_at"`
@@ -36,10 +38,22 @@ type configMetaResponse struct {
 	IsActive    bool   `json:"is_active"`
 }
 
+// namedConfigSummaryResponse is the JSON shape for a NamedConfigSummary.
+type namedConfigSummaryResponse struct {
+	ServiceName      string `json:"service_name"`
+	ConfigName       string `json:"config_name"`
+	Format           string `json:"format"`
+	VersionCount     int32  `json:"version_count"`
+	LatestVersion    int64  `json:"latest_version"`
+	LatestUpdatedAt  string `json:"latest_updated_at"`
+	HasActiveRollout bool   `json:"has_active_rollout"`
+}
+
 func toConfigDataResp(c *pb.ConfigData) configDataResponse {
 	return configDataResponse{
 		ConfigID:    c.GetConfigId(),
 		ServiceName: c.GetServiceName(),
+		ConfigName:  c.GetConfigName(),
 		Version:     c.GetVersion(),
 		Content:     c.GetContent(),
 		Format:      c.GetFormat(),
@@ -53,12 +67,25 @@ func toConfigMetaResp(m *pb.ConfigMetadata) configMetaResponse {
 	return configMetaResponse{
 		ConfigID:    m.GetConfigId(),
 		ServiceName: m.GetServiceName(),
+		ConfigName:  m.GetConfigName(),
 		Version:     m.GetVersion(),
 		Format:      m.GetFormat(),
 		CreatedAt:   time.Unix(m.GetCreatedAt(), 0).UTC().Format(time.RFC3339),
 		CreatedBy:   m.GetCreatedBy(),
 		Description: m.GetDescription(),
 		IsActive:    m.GetIsActive(),
+	}
+}
+
+func toNamedConfigSummaryResp(n *pb.NamedConfigSummary) namedConfigSummaryResponse {
+	return namedConfigSummaryResponse{
+		ServiceName:      n.GetServiceName(),
+		ConfigName:       n.GetConfigName(),
+		Format:           n.GetFormat(),
+		VersionCount:     n.GetVersionCount(),
+		LatestVersion:    n.GetLatestVersion(),
+		LatestUpdatedAt:  n.GetLatestUpdatedAt(),
+		HasActiveRollout: n.GetHasActiveRollout(),
 	}
 }
 
@@ -74,11 +101,41 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// ListConfigs handles GET /api/services/:serviceName/configs
+// ListNamedConfigs handles GET /api/services/:serviceName/named-configs
+func ListNamedConfigs(clients *grpcclient.Clients) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+		serviceName := vars["serviceName"]
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		resp, err := clients.API.ListNamedConfigs(ctx, &pb.ListNamedConfigsRequest{
+			ServiceName: serviceName,
+		})
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+
+		summaries := make([]namedConfigSummaryResponse, 0, len(resp.GetConfigs()))
+		for _, nc := range resp.GetConfigs() {
+			summaries = append(summaries, toNamedConfigSummaryResp(nc))
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"configs": summaries,
+			"success": resp.GetSuccess(),
+		})
+	}
+}
+
+// ListConfigs handles GET /api/services/:serviceName/configs/:configName/versions
 func ListConfigs(clients *grpcclient.Clients) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		vars := mux.Vars(r)
 		serviceName := vars["serviceName"]
+		configName := vars["configName"]
 
 		limit := int32(20)
 		offset := int32(0)
@@ -99,6 +156,7 @@ func ListConfigs(clients *grpcclient.Clients) http.HandlerFunc {
 
 		resp, err := clients.API.ListConfigs(ctx, &pb.ListConfigsRequest{
 			ServiceName: serviceName,
+			ConfigName:  configName,
 			Limit:       limit,
 			Offset:      offset,
 		})
@@ -153,6 +211,7 @@ func UploadConfig(clients *grpcclient.Clients) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			ServiceName string `json:"service_name"`
+			ConfigName  string `json:"config_name"`
 			Content     string `json:"content"`
 			Format      string `json:"format"`
 			CreatedBy   string `json:"created_by"`
@@ -170,6 +229,7 @@ func UploadConfig(clients *grpcclient.Clients) http.HandlerFunc {
 
 		resp, err := clients.API.UploadConfig(ctx, &pb.UploadConfigRequest{
 			ServiceName: body.ServiceName,
+			ConfigName:  body.ConfigName,
 			Content:     body.Content,
 			Format:      body.Format,
 			CreatedBy:   body.CreatedBy,
