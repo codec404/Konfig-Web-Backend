@@ -5,14 +5,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/codec404/Konfig/pkg/pb"
+	"github.com/codec404/konfig-web-backend/internal/auth"
 	grpcclient "github.com/codec404/konfig-web-backend/internal/grpc"
 	"github.com/gorilla/mux"
 )
 
-// parseStrategy maps a human-readable strategy string to the proto enum value.
 func parseStrategy(s string) pb.RolloutStrategy {
 	switch s {
 	case "CANARY":
@@ -24,7 +25,6 @@ func parseStrategy(s string) pb.RolloutStrategy {
 	}
 }
 
-// rolloutStatusString converts a RolloutStatus enum to a string for JSON.
 func rolloutStatusString(s pb.RolloutStatus) string {
 	switch s {
 	case pb.RolloutStatus_PENDING:
@@ -42,7 +42,6 @@ func rolloutStatusString(s pb.RolloutStatus) string {
 	}
 }
 
-// rolloutStrategyString converts a RolloutStrategy enum to a string for JSON.
 func rolloutStrategyString(s pb.RolloutStrategy) string {
 	switch s {
 	case pb.RolloutStrategy_CANARY:
@@ -79,10 +78,10 @@ func serviceInstanceToMap(si *pb.ServiceInstance) map[string]any {
 		return nil
 	}
 	m := map[string]any{
-		"service_name":          si.GetServiceName(),
-		"instance_id":           si.GetInstanceId(),
+		"service_name":           si.GetServiceName(),
+		"instance_id":            si.GetInstanceId(),
 		"current_config_version": si.GetCurrentConfigVersion(),
-		"status":                si.GetStatus(),
+		"status":                 si.GetStatus(),
 	}
 	if si.GetLastHeartbeat() != 0 {
 		m["last_heartbeat"] = time.Unix(si.GetLastHeartbeat(), 0).UTC().Format(time.RFC3339)
@@ -94,16 +93,21 @@ func serviceInstanceToMap(si *pb.ServiceInstance) map[string]any {
 }
 
 // StartRollout handles POST /api/rollouts
-func StartRollout(clients *grpcclient.Clients) http.HandlerFunc {
+func StartRollout(clients *grpcclient.Clients, store *auth.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		user := auth.UserFromContext(r.Context())
+		ns := resolveNS(r, user, store)
 		var body struct {
 			ConfigID         string `json:"config_id"`
 			Strategy         string `json:"strategy"`
 			TargetPercentage int32  `json:"target_percentage"`
 		}
-
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+			return
+		}
+		if !ownsConfigID(ns, body.ConfigID) {
+			writeError(w, http.StatusForbidden, "access denied")
 			return
 		}
 
@@ -129,10 +133,17 @@ func StartRollout(clients *grpcclient.Clients) http.HandlerFunc {
 }
 
 // GetRolloutStatus handles GET /api/rollouts/:configId/status
-func GetRolloutStatus(clients *grpcclient.Clients) http.HandlerFunc {
+func GetRolloutStatus(clients *grpcclient.Clients, store *auth.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		user := auth.UserFromContext(r.Context())
+		ns := resolveNS(r, user, store)
 		vars := mux.Vars(r)
 		configID := vars["configId"]
+
+		if !ownsConfigID(ns, configID) {
+			writeError(w, http.StatusForbidden, "access denied")
+			return
+		}
 
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
@@ -159,14 +170,15 @@ func GetRolloutStatus(clients *grpcclient.Clients) http.HandlerFunc {
 }
 
 // Rollback handles POST /api/rollbacks
-func Rollback(clients *grpcclient.Clients) http.HandlerFunc {
+func Rollback(clients *grpcclient.Clients, store *auth.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		user := auth.UserFromContext(r.Context())
+		ns := resolveNS(r, user, store)
 		var body struct {
 			ServiceName string `json:"service_name"`
 			ConfigName  string `json:"config_name"`
 			ToVersion   int64  `json:"to_version"`
 		}
-
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 			return
@@ -176,7 +188,7 @@ func Rollback(clients *grpcclient.Clients) http.HandlerFunc {
 		defer cancel()
 
 		resp, err := clients.API.Rollback(ctx, &pb.RollbackRequest{
-			ServiceName:   body.ServiceName,
+			ServiceName:   applyNS(ns, body.ServiceName),
 			ConfigName:    body.ConfigName,
 			TargetVersion: body.ToVersion,
 		})
@@ -194,10 +206,17 @@ func Rollback(clients *grpcclient.Clients) http.HandlerFunc {
 }
 
 // PromoteRollout handles POST /api/rollouts/:configId/promote
-func PromoteRollout(clients *grpcclient.Clients) http.HandlerFunc {
+func PromoteRollout(clients *grpcclient.Clients, store *auth.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		user := auth.UserFromContext(r.Context())
+		ns := resolveNS(r, user, store)
 		vars := mux.Vars(r)
 		configID := vars["configId"]
+
+		if !ownsConfigID(ns, configID) {
+			writeError(w, http.StatusForbidden, "access denied")
+			return
+		}
 
 		var body struct {
 			NewTargetPercentage int32 `json:"new_target_percentage"`
@@ -228,8 +247,10 @@ func PromoteRollout(clients *grpcclient.Clients) http.HandlerFunc {
 }
 
 // ListRollouts handles GET /api/rollouts?status_filter=ACTIVE&limit=50
-func ListRollouts(clients *grpcclient.Clients) http.HandlerFunc {
+func ListRollouts(clients *grpcclient.Clients, store *auth.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		user := auth.UserFromContext(r.Context())
+		ns := resolveNS(r, user, store)
 		statusFilter := r.URL.Query().Get("status_filter")
 		limit := int32(50)
 		if v := r.URL.Query().Get("limit"); v != "" {
@@ -250,11 +271,15 @@ func ListRollouts(clients *grpcclient.Clients) http.HandlerFunc {
 			return
 		}
 
-		rollouts := make([]map[string]any, 0, len(resp.GetRollouts()))
+		rollouts := make([]map[string]any, 0)
 		for _, ro := range resp.GetRollouts() {
+			if ns != "" && !strings.HasPrefix(ro.GetConfigId(), ns) {
+				continue
+			}
+			cleanSvc, _ := stripNS(ns, ro.GetServiceName())
 			rollouts = append(rollouts, map[string]any{
 				"config_id":          ro.GetConfigId(),
-				"service_name":       ro.GetServiceName(),
+				"service_name":       cleanSvc,
 				"strategy":           ro.GetStrategy(),
 				"target_percentage":  ro.GetTargetPercentage(),
 				"current_percentage": ro.GetCurrentPercentage(),

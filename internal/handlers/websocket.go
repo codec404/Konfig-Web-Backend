@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/codec404/Konfig/pkg/pb"
+	"github.com/codec404/konfig-web-backend/internal/auth"
 	grpcclient "github.com/codec404/konfig-web-backend/internal/grpc"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
@@ -20,21 +21,19 @@ var upgrader = websocket.Upgrader{
 }
 
 // Subscribe handles WS /ws/subscribe/:serviceName
-//
-// It upgrades the HTTP connection to a WebSocket, opens a bidirectional gRPC
-// stream to the Distribution Service, and bridges the two:
-//   - gRPC stream → WebSocket: config updates are forwarded as JSON.
-//   - WebSocket → gRPC stream: incoming messages (heartbeats) are silently ignored.
-func Subscribe(clients *grpcclient.Clients) http.HandlerFunc {
+func Subscribe(clients *grpcclient.Clients, store *auth.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		user := auth.UserFromContext(r.Context())
+		ns := resolveNS(r, user, store)
 		vars := mux.Vars(r)
-		serviceName := vars["serviceName"]
+		cleanSvcName := vars["serviceName"]
+		internalSvcName := applyNS(ns, cleanSvcName)
+
 		instanceID := r.URL.Query().Get("instance_id")
 		if instanceID == "" {
 			instanceID = "web-bff"
 		}
 
-		// Upgrade to WebSocket.
 		wsConn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			log.Printf("websocket upgrade error: %v", err)
@@ -42,9 +41,6 @@ func Subscribe(clients *grpcclient.Clients) http.HandlerFunc {
 		}
 		defer wsConn.Close()
 
-		// Open long-lived gRPC bidirectional stream. We use a background context
-		// so the stream lifetime is tied to the WebSocket connection, not the
-		// original HTTP request context (which is cancelled on upgrade).
 		streamCtx, streamCancel := context.WithCancel(context.Background())
 		defer streamCancel()
 
@@ -55,9 +51,8 @@ func Subscribe(clients *grpcclient.Clients) http.HandlerFunc {
 			return
 		}
 
-		// Send initial subscription request.
 		if err := stream.Send(&pb.SubscribeRequest{
-			ServiceName:    serviceName,
+			ServiceName:    internalSvcName,
 			InstanceId:     instanceID,
 			CurrentVersion: 0,
 		}); err != nil {
@@ -68,7 +63,6 @@ func Subscribe(clients *grpcclient.Clients) http.HandlerFunc {
 
 		done := make(chan struct{})
 
-		// Goroutine: read from gRPC stream and forward to WebSocket.
 		go func() {
 			defer close(done)
 			for {
@@ -78,7 +72,7 @@ func Subscribe(clients *grpcclient.Clients) http.HandlerFunc {
 					return
 				}
 
-				payload, err := marshalConfigUpdate(update)
+				payload, err := marshalConfigUpdate(update, ns)
 				if err != nil {
 					log.Printf("marshal ConfigUpdate error: %v", err)
 					continue
@@ -91,7 +85,6 @@ func Subscribe(clients *grpcclient.Clients) http.HandlerFunc {
 			}
 		}()
 
-		// Goroutine: read from WebSocket (heartbeats / control frames) and discard.
 		go func() {
 			for {
 				_, _, err := wsConn.ReadMessage()
@@ -100,18 +93,15 @@ func Subscribe(clients *grpcclient.Clients) http.HandlerFunc {
 					streamCancel()
 					return
 				}
-				// Heartbeat messages are intentionally ignored.
 			}
 		}()
 
-		// Block until the gRPC side closes.
 		<-done
 	}
 }
 
-// marshalConfigUpdate converts a ConfigUpdate proto to a JSON byte slice
-// with timestamp fields rendered as RFC3339 strings.
-func marshalConfigUpdate(u *pb.ConfigUpdate) ([]byte, error) {
+// marshalConfigUpdate converts a ConfigUpdate proto to JSON, stripping the namespace prefix from service_name.
+func marshalConfigUpdate(u *pb.ConfigUpdate, ns string) ([]byte, error) {
 	type configDataJSON struct {
 		ConfigID    string `json:"config_id"`
 		ServiceName string `json:"service_name"`
@@ -135,9 +125,13 @@ func marshalConfigUpdate(u *pb.ConfigUpdate) ([]byte, error) {
 	}
 
 	if cd := u.GetConfig(); cd != nil {
+		cleanSvc := cd.GetServiceName()
+		if ns != "" && len(cleanSvc) > len(ns) {
+			cleanSvc = cleanSvc[len(ns):]
+		}
 		p.Config = &configDataJSON{
 			ConfigID:    cd.GetConfigId(),
-			ServiceName: cd.GetServiceName(),
+			ServiceName: cleanSvc,
 			Version:     cd.GetVersion(),
 			Content:     cd.GetContent(),
 			Format:      cd.GetFormat(),

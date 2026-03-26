@@ -21,9 +21,12 @@ type Config struct {
 	GoogleClientSecret string
 
 	// Super admin seed (created on first startup if no super_admin exists)
-	SuperAdminName     string
-	SuperAdminEmail    string
-	SuperAdminPassword string
+	SuperAdminName  string
+	SuperAdminEmail string
+
+	// Resend mailer (leave ResendAPIKey empty to log OTPs to stdout instead)
+	ResendAPIKey string
+	ResendFrom   string
 }
 
 func Load() *Config {
@@ -42,9 +45,11 @@ func Load() *Config {
 		GoogleClientID:     getEnv("GOOGLE_CLIENT_ID", ""),
 		GoogleClientSecret: getEnv("GOOGLE_CLIENT_SECRET", ""),
 
-		SuperAdminName:     getEnv("SUPER_ADMIN_NAME", "Super Admin"),
-		SuperAdminEmail:    getEnv("SUPER_ADMIN_EMAIL", "admin@konfig.local"),
-		SuperAdminPassword: getEnv("SUPER_ADMIN_PASSWORD", "changeme123"),
+		SuperAdminName:  getEnv("SUPER_ADMIN_NAME", "Super Admin"),
+		SuperAdminEmail: getEnv("SUPER_ADMIN_EMAIL", "admin@konfig.local"),
+
+		ResendAPIKey: getEnv("RESEND_API_KEY", ""),
+		ResendFrom:   getEnv("RESEND_FROM", "noreply@konfig.org.in"),
 	}
 }
 
@@ -54,3 +59,4 @@ func getEnv(key, defaultVal string) string {
 	}
 	return defaultVal
 }
+
