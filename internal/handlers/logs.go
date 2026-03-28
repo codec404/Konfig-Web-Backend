@@ -25,6 +25,10 @@ func IngestFrontendLogs(store *auth.Store) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
+		if len(entries) > 100 {
+			writeError(w, http.StatusBadRequest, "too many log entries (max 100 per request)")
+			return
+		}
 		for _, e := range entries {
 			level := e.Level
 			if level == "" {

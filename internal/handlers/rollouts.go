@@ -128,7 +128,7 @@ func StartRollout(clients *grpcclient.Clients, store *auth.Store) http.HandlerFu
 		})
 		if err != nil {
 			applogger.Error("start rollout: gRPC failed", map[string]any{"config_id": body.ConfigID, "err": err.Error()})
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusBadGateway, "upstream service error")
 			return
 		}
 		applogger.Info("rollout started", map[string]any{
@@ -167,7 +167,7 @@ func GetRolloutStatus(clients *grpcclient.Clients, store *auth.Store) http.Handl
 			ConfigId: configID,
 		})
 		if err != nil {
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusBadGateway, "upstream service error")
 			return
 		}
 
@@ -215,7 +215,7 @@ func Rollback(clients *grpcclient.Clients, store *auth.Store) http.HandlerFunc {
 		})
 		if err != nil {
 			applogger.Error("rollback: gRPC failed", map[string]any{"service": body.ServiceName, "version": body.ToVersion, "err": err.Error()})
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusBadGateway, "upstream service error")
 			return
 		}
 		applogger.Info("rollback executed", map[string]any{
@@ -264,7 +264,7 @@ func PromoteRollout(clients *grpcclient.Clients, store *auth.Store) http.Handler
 		})
 		if err != nil {
 			applogger.Error("promote rollout: gRPC failed", map[string]any{"config_id": configID, "err": err.Error()})
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusBadGateway, "upstream service error")
 			return
 		}
 		applogger.Info("rollout promoted", map[string]any{
@@ -305,7 +305,7 @@ func ListRollouts(clients *grpcclient.Clients, store *auth.Store) http.HandlerFu
 			Limit:        limit,
 		})
 		if err != nil {
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusBadGateway, "upstream service error")
 			return
 		}
 

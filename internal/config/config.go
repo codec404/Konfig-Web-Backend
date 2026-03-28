@@ -55,7 +55,7 @@ func Load() *Config {
 
 		ResendAPIKey:   getEnv("RESEND_API_KEY", ""),
 		ResendFrom:     getEnv("RESEND_FROM", "noreply@konfig.org.in"),
-		DeveloperEmail: getEnv("DEVELOPER_EMAIL", "saptarshimemari072@gmail.com"),
+		DeveloperEmail: getEnv("DEVELOPER_EMAIL", ""),
 	}
 }
 

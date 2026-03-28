@@ -10,23 +10,28 @@ import (
 	"github.com/codec404/Konfig/pkg/pb"
 	"github.com/codec404/konfig-web-backend/internal/auth"
 	grpcclient "github.com/codec404/konfig-web-backend/internal/grpc"
+	"github.com/codec404/konfig-web-backend/internal/middleware"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 )
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
-}
-
 // Subscribe handles WS /ws/subscribe/:serviceName
-func Subscribe(clients *grpcclient.Clients, store *auth.Store) http.HandlerFunc {
+func Subscribe(clients *grpcclient.Clients, store *auth.Store, baseDomain string) http.HandlerFunc {
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			return middleware.IsAllowedOrigin(origin, baseDomain)
+		},
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		user := auth.UserFromContext(r.Context())
 		ns := resolveNS(r, user, store)
 		vars := mux.Vars(r)
 		cleanSvcName := vars["serviceName"]
+		if !validName.MatchString(cleanSvcName) {
+			writeError(w, http.StatusBadRequest, "invalid service name")
+			return
+		}
 		internalSvcName := applyNS(ns, cleanSvcName)
 
 		if !checkPerm(r, user, ns, "live.view", store) {
@@ -52,7 +57,7 @@ func Subscribe(clients *grpcclient.Clients, store *auth.Store) http.HandlerFunc 
 		stream, err := clients.Dist.Subscribe(streamCtx)
 		if err != nil {
 			log.Printf("grpc Subscribe error: %v", err)
-			wsConn.WriteJSON(map[string]string{"error": "failed to open gRPC stream: " + err.Error()})
+			wsConn.WriteJSON(map[string]string{"error": "failed to open stream"})
 			return
 		}
 
@@ -62,7 +67,7 @@ func Subscribe(clients *grpcclient.Clients, store *auth.Store) http.HandlerFunc 
 			CurrentVersion: 0,
 		}); err != nil {
 			log.Printf("grpc stream Send error: %v", err)
-			wsConn.WriteJSON(map[string]string{"error": "failed to subscribe: " + err.Error()})
+			wsConn.WriteJSON(map[string]string{"error": "subscription failed"})
 			return
 		}
 

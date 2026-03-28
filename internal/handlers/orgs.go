@@ -243,7 +243,7 @@ func (h *OrgHandler) ListOrgServices(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	resp, err := h.clients.API.ListServices(ctx, &pb.ListServicesRequest{})
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		writeError(w, http.StatusBadGateway, "upstream service error")
 		return
 	}
 	services := make([]map[string]any, 0)
@@ -342,7 +342,7 @@ func (h *OrgHandler) RemoveUser(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "user not found")
 			return
 		}
-		writeError(w, http.StatusForbidden, err.Error())
+		writeError(w, http.StatusForbidden, "operation not permitted")
 		return
 	}
 	applogger.Info("user removed", map[string]any{"user_id": userID, "removed_by": caller.ID})
@@ -366,7 +366,7 @@ func (h *OrgHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "user not found")
 			return
 		}
-		writeError(w, http.StatusForbidden, err.Error())
+		writeError(w, http.StatusForbidden, "operation not permitted")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
@@ -451,7 +451,7 @@ func (h *OrgHandler) RemoveOrgMember(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "user not found")
 			return
 		}
-		writeError(w, http.StatusForbidden, err.Error())
+		writeError(w, http.StatusForbidden, "operation not permitted")
 		return
 	}
 	applogger.Info("org member removed", map[string]any{"user_id": userID, "org_id": removeOrgID, "removed_by": caller.ID})
@@ -475,7 +475,7 @@ func (h *OrgHandler) UpdateOrgMember(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "user not found")
 			return
 		}
-		writeError(w, http.StatusForbidden, err.Error())
+		writeError(w, http.StatusForbidden, "operation not permitted")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
@@ -718,7 +718,7 @@ func (h *OrgHandler) GetOrgServicesForUser(w http.ResponseWriter, r *http.Reques
 	defer cancel()
 	resp, err := h.clients.API.ListServices(ctx, &pb.ListServicesRequest{})
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		writeError(w, http.StatusBadGateway, "upstream service error")
 		return
 	}
 
@@ -795,7 +795,7 @@ func (h *OrgHandler) ChangeOrgMemberRole(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusNotFound, "member not found")
 			return
 		}
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, "invalid role")
 		return
 	}
 	applogger.Info("org member role changed", map[string]any{"user_id": userID, "org_id": orgID, "new_role": string(req.Role), "changed_by": caller.ID})
@@ -1066,7 +1066,7 @@ func (h *OrgHandler) PreviewEmail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		http.Error(w, "render error: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

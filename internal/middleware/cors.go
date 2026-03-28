@@ -15,7 +15,7 @@ func CORS(h http.Handler, baseDomain string) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if isAllowedOrigin(origin, baseDomain) {
+		if IsAllowedOrigin(origin, baseDomain) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 		}
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
@@ -31,7 +31,7 @@ func CORS(h http.Handler, baseDomain string) http.Handler {
 	})
 }
 
-func isAllowedOrigin(origin, baseDomain string) bool {
+func IsAllowedOrigin(origin, baseDomain string) bool {
 	if origin == "" {
 		return false
 	}

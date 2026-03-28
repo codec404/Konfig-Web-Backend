@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -81,19 +82,20 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-// realIP extracts the real client IP, respecting reverse proxy headers.
+// realIP extracts the real client IP from reverse proxy headers.
+// Caddy (our reverse proxy) appends the client IP to X-Forwarded-For, so the
+// rightmost entry is the most recently added and trustworthy value.
+// We intentionally do NOT trust the leftmost entry to prevent header spoofing.
 func realIP(r *http.Request) string {
-	if ip := r.Header.Get("X-Real-IP"); ip != "" {
-		return ip
-	}
-	if ip := r.Header.Get("X-Forwarded-For"); ip != "" {
-		// X-Forwarded-For can be a comma-separated list; take the first
-		for i := 0; i < len(ip); i++ {
-			if ip[i] == ',' {
-				return ip[:i]
-			}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// Take the rightmost (last) entry — added by our trusted proxy (Caddy)
+		last := xff
+		if i := strings.LastIndex(xff, ","); i >= 0 {
+			last = strings.TrimSpace(xff[i+1:])
 		}
-		return ip
+		if last != "" {
+			return last
+		}
 	}
 	// Fall back to RemoteAddr (strip port)
 	addr := r.RemoteAddr

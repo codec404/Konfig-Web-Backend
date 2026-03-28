@@ -2,6 +2,7 @@ package auth
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -107,15 +108,19 @@ func (s *Store) Migrate() error {
 	// One-time passwords (login & first-time password setup)
 	if _, err := s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS otps (
-			id         TEXT PRIMARY KEY,
-			email      TEXT NOT NULL,
-			code       TEXT NOT NULL,
-			purpose    TEXT NOT NULL,
-			expires_at TIMESTAMPTZ NOT NULL,
-			used_at    TIMESTAMPTZ,
-			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			id              TEXT PRIMARY KEY,
+			email           TEXT NOT NULL,
+			code            TEXT NOT NULL,
+			purpose         TEXT NOT NULL,
+			expires_at      TIMESTAMPTZ NOT NULL,
+			used_at         TIMESTAMPTZ,
+			failed_attempts INTEGER NOT NULL DEFAULT 0,
+			created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)
 	`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`ALTER TABLE otps ADD COLUMN IF NOT EXISTS failed_attempts INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
 
@@ -389,19 +394,29 @@ func (s *Store) CreateOTP(email, purpose string) (string, error) {
 
 // VerifyAndConsumeOTP checks that the code is valid, unexpired and unused,
 // then marks it consumed. Returns ErrInvalidOTP on any mismatch.
+// After 5 failed attempts the OTP is permanently locked.
 func (s *Store) VerifyAndConsumeOTP(email, code, purpose string) error {
-	var id string
+	var id, storedCode string
+	var attempts int
 	err := s.db.QueryRow(
-		`SELECT id FROM otps
-		 WHERE email = $1 AND code = $2 AND purpose = $3
-		   AND used_at IS NULL AND expires_at > NOW()`,
-		email, code, purpose,
-	).Scan(&id)
+		`SELECT id, code, failed_attempts FROM otps
+		 WHERE email = $1 AND purpose = $2
+		   AND used_at IS NULL AND expires_at > NOW()
+		 ORDER BY created_at DESC LIMIT 1`,
+		email, purpose,
+	).Scan(&id, &storedCode, &attempts)
 	if err == sql.ErrNoRows {
 		return ErrInvalidOTP
 	}
 	if err != nil {
 		return err
+	}
+	if attempts >= 5 {
+		return ErrInvalidOTP
+	}
+	if subtle.ConstantTimeCompare([]byte(storedCode), []byte(code)) != 1 {
+		s.db.Exec(`UPDATE otps SET failed_attempts = failed_attempts + 1 WHERE id = $1`, id)
+		return ErrInvalidOTP
 	}
 	_, err = s.db.Exec(`UPDATE otps SET used_at = NOW() WHERE id = $1`, id)
 	return err
@@ -1117,9 +1132,10 @@ func (s *Store) ListMyInvites(email string) ([]OrgInvite, error) {
 }
 
 // ListOrgInvites returns all pending invites for an org (admin view).
+// Token is intentionally omitted — admins have no need to act on other users' invite tokens.
 func (s *Store) ListOrgInvites(orgID string) ([]OrgInvite, error) {
 	rows, err := s.db.Query(`
-		SELECT i.id, i.org_id, o.name, i.email, i.role, i.invited_by, u.name, i.token, i.expires_at, i.created_at
+		SELECT i.id, i.org_id, o.name, i.email, i.role, i.invited_by, u.name, i.expires_at, i.created_at
 		FROM org_invites i
 		JOIN organizations o ON o.id = i.org_id
 		LEFT JOIN users u ON u.id = i.invited_by
@@ -1134,7 +1150,7 @@ func (s *Store) ListOrgInvites(orgID string) ([]OrgInvite, error) {
 		var inv OrgInvite
 		var inviterName sql.NullString
 		if err := rows.Scan(&inv.ID, &inv.OrgID, &inv.OrgName, &inv.Email, &inv.Role,
-			&inv.InvitedBy, &inviterName, &inv.Token, &inv.ExpiresAt, &inv.CreatedAt); err != nil {
+			&inv.InvitedBy, &inviterName, &inv.ExpiresAt, &inv.CreatedAt); err != nil {
 			return nil, err
 		}
 		inv.InviterName = inviterName.String

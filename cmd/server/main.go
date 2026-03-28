@@ -19,6 +19,11 @@ import (
 func main() {
 	cfg := config.Load()
 
+	// ── Security guards ───────────────────────────────────────────────
+	if cfg.JWTSecret == "change-me-in-production" {
+		log.Fatal("FATAL: JWT_SECRET is set to the insecure default. Set a strong secret before starting.")
+	}
+
 	// ── Database ──────────────────────────────────────────────────────
 	database, err := db.Connect(cfg.DatabaseURL)
 	if err != nil {
@@ -55,6 +60,8 @@ func main() {
 
 	// ── Router ────────────────────────────────────────────────────────
 	r := mux.NewRouter()
+	r.Use(middleware.SecurityHeaders)
+	r.Use(middleware.MaxBodySize(2 << 20)) // 2 MB
 	r.Use(middleware.RequestLogger(store))
 
 	authLimiter := middleware.NewRateLimiter(10, 5)
@@ -170,7 +177,7 @@ func main() {
 	svcRouter.Handle("/api/stats", handlers.GetStats(clients, store)).Methods(http.MethodGet, http.MethodOptions)
 	svcRouter.Handle("/api/audit-log", handlers.GetAuditLog(clients, store)).Methods(http.MethodGet, http.MethodOptions)
 
-	svcRouter.HandleFunc("/ws/subscribe/{serviceName}", handlers.Subscribe(clients, store))
+	svcRouter.HandleFunc("/ws/subscribe/{serviceName}", handlers.Subscribe(clients, store, cfg.BaseDomain))
 
 	log.Printf("Starting server on :%s", cfg.Port)
 	if err := http.ListenAndServe(":"+cfg.Port, middleware.CORS(r, cfg.BaseDomain)); err != nil {

@@ -43,7 +43,7 @@ func ValidateConfig(clients *grpcclient.Clients, store *auth.Store) http.Handler
 			Strict:      body.Strict,
 		})
 		if err != nil {
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusBadGateway, "upstream service error")
 			return
 		}
 
@@ -131,7 +131,7 @@ func ListSchemas(clients *grpcclient.Clients, store *auth.Store) http.HandlerFun
 			ServiceName: internalSvcName,
 		})
 		if err != nil {
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusBadGateway, "upstream service error")
 			return
 		}
 
@@ -169,7 +169,7 @@ func GetSchema(clients *grpcclient.Clients, store *auth.Store) http.HandlerFunc 
 
 		resp, err := clients.Val.GetSchema(ctx, &pb.GetSchemaRequest{SchemaId: schemaID})
 		if err != nil {
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusBadGateway, "upstream service error")
 			return
 		}
 
@@ -178,7 +178,12 @@ func GetSchema(clients *grpcclient.Clients, store *auth.Store) http.HandlerFunc 
 			return
 		}
 
-		cleanSvc, _ := stripNS(ns, resp.GetSchema().GetServiceName())
+		cleanSvc, ok := stripNS(ns, resp.GetSchema().GetServiceName())
+		if !ok {
+			// Schema exists but belongs to a different namespace — treat as not found
+			writeError(w, http.StatusNotFound, "schema not found")
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"schema":  schemaToMap(resp.GetSchema(), cleanSvc),
 			"success": resp.GetSuccess(),
@@ -229,7 +234,7 @@ func RegisterSchema(clients *grpcclient.Clients, store *auth.Store) http.Handler
 			CreatedBy:     createdBy,
 		})
 		if err != nil {
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusBadGateway, "upstream service error")
 			return
 		}
 

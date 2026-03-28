@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +15,9 @@ import (
 	applogger "github.com/codec404/konfig-web-backend/internal/logger"
 	"github.com/gorilla/mux"
 )
+
+// validName matches service/config names: alphanumeric, hyphens, underscores, dots (1–128 chars).
+var validName = regexp.MustCompile(`^[a-zA-Z0-9._\-]{1,128}$`)
 
 // ── Namespace helpers ─────────────────────────────────────────────────────────
 
@@ -228,7 +232,7 @@ func ListServices(clients *grpcclient.Clients, store *auth.Store) http.HandlerFu
 
 		resp, err := clients.API.ListServices(ctx, &pb.ListServicesRequest{})
 		if err != nil {
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusBadGateway, "upstream service error")
 			return
 		}
 
@@ -291,7 +295,7 @@ func ListNamedConfigs(clients *grpcclient.Clients, store *auth.Store) http.Handl
 			ServiceName: internalSvcName,
 		})
 		if err != nil {
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusBadGateway, "upstream service error")
 			return
 		}
 
@@ -345,7 +349,7 @@ func ListConfigs(clients *grpcclient.Clients, store *auth.Store) http.HandlerFun
 			Offset:      offset,
 		})
 		if err != nil {
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusBadGateway, "upstream service error")
 			return
 		}
 
@@ -384,7 +388,7 @@ func GetConfig(clients *grpcclient.Clients, store *auth.Store) http.HandlerFunc 
 
 		resp, err := clients.API.GetConfig(ctx, &pb.GetConfigRequest{ConfigId: configID})
 		if err != nil {
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusBadGateway, "upstream service error")
 			return
 		}
 
@@ -427,6 +431,14 @@ func UploadConfig(clients *grpcclient.Clients, store *auth.Store) http.HandlerFu
 			writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 			return
 		}
+		if !validName.MatchString(body.ServiceName) {
+			writeError(w, http.StatusBadRequest, "invalid service_name")
+			return
+		}
+		if !validName.MatchString(body.ConfigName) {
+			writeError(w, http.StatusBadRequest, "invalid config_name")
+			return
+		}
 
 		internalSvcName := applyNS(ns, body.ServiceName)
 		// Use the authenticated user's ID as creator if not specified
@@ -449,7 +461,7 @@ func UploadConfig(clients *grpcclient.Clients, store *auth.Store) http.HandlerFu
 		})
 		if err != nil {
 			applogger.Error("upload config: gRPC failed", map[string]any{"service": body.ServiceName, "config": body.ConfigName, "err": err.Error()})
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusBadGateway, "upstream service error")
 			return
 		}
 
@@ -498,7 +510,7 @@ func DeleteConfig(clients *grpcclient.Clients, store *auth.Store) http.HandlerFu
 		resp, err := clients.API.DeleteConfig(ctx, &pb.DeleteConfigRequest{ConfigId: configID})
 		if err != nil {
 			applogger.Error("delete config: gRPC failed", map[string]any{"config_id": configID, "err": err.Error()})
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusBadGateway, "upstream service error")
 			return
 		}
 		applogger.Info("config deleted", map[string]any{"config_id": configID, "user_id": user.ID})
@@ -523,7 +535,7 @@ func GetStats(clients *grpcclient.Clients, store *auth.Store) http.HandlerFunc {
 		if ns == "" {
 			resp, err := clients.API.GetStats(ctx, &pb.GetStatsRequest{})
 			if err != nil {
-				writeError(w, http.StatusBadGateway, err.Error())
+				writeError(w, http.StatusBadGateway, "upstream service error")
 				return
 			}
 			s := resp.GetStats()
@@ -543,7 +555,7 @@ func GetStats(clients *grpcclient.Clients, store *auth.Store) http.HandlerFunc {
 		// Services + configs
 		svcResp, err := clients.API.ListServices(ctx, &pb.ListServicesRequest{})
 		if err != nil {
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusBadGateway, "upstream service error")
 			return
 		}
 		for _, s := range svcResp.GetServices() {
@@ -614,7 +626,7 @@ func GetAuditLog(clients *grpcclient.Clients, store *auth.Store) http.HandlerFun
 			Limit:       limit,
 		})
 		if err != nil {
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusBadGateway, "upstream service error")
 			return
 		}
 

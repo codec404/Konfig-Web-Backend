@@ -2,9 +2,12 @@ package handlers
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -14,6 +17,10 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
+
+var emailRE = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
+
+func validEmail(e string) bool { return len(e) <= 254 && emailRE.MatchString(e) }
 
 type AuthHandler struct {
 	store        *auth.Store
@@ -99,6 +106,14 @@ func (h *AuthHandler) Signup(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+		return
+	}
+	if !validEmail(req.Email) {
+		http.Error(w, `{"error":"invalid email address"}`, http.StatusBadRequest)
+		return
+	}
+	if len(strings.TrimSpace(req.Name)) == 0 || len(req.Name) > 100 {
+		http.Error(w, `{"error":"name must be 1–100 characters"}`, http.StatusBadRequest)
 		return
 	}
 	if req.AccountType != auth.AccountTypeIndividual && req.AccountType != auth.AccountTypeOrg {
@@ -200,6 +215,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		Name:     auth.CookieName(),
 		Value:    "",
 		Path:     "/",
+		Domain:   h.cookieDomain,
 		HttpOnly: true,
 		Secure:   h.secureCookie,
 		SameSite: http.SameSiteLaxMode,
@@ -221,6 +237,10 @@ func (h *AuthHandler) SendOTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" {
 		writeError(w, http.StatusBadRequest, "email is required")
+		return
+	}
+	if !validEmail(req.Email) {
+		writeError(w, http.StatusBadRequest, "invalid email address")
 		return
 	}
 	if req.Purpose != "login" {
@@ -318,11 +338,44 @@ func (h *AuthHandler) LoginWithOTP(w http.ResponseWriter, r *http.Request) {
 // ── Google OAuth ──────────────────────────────────────────────────────────────
 
 func (h *AuthHandler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
-	url := h.oauthCfg.AuthCodeURL("state", oauth2.AccessTypeOnline)
-	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		http.Redirect(w, r, h.appURL+"/login?error=oauth_failed", http.StatusTemporaryRedirect)
+		return
+	}
+	state := hex.EncodeToString(b)
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oauth_state",
+		Value:    state,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   h.secureCookie,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   300, // 5 minutes
+	})
+	authURL := h.oauthCfg.AuthCodeURL(state, oauth2.AccessTypeOnline)
+	http.Redirect(w, r, authURL, http.StatusTemporaryRedirect)
 }
 
 func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
+	// Validate OAuth state to prevent CSRF
+	stateCookie, err := r.Cookie("oauth_state")
+	if err != nil || stateCookie.Value == "" || stateCookie.Value != r.URL.Query().Get("state") {
+		applogger.Warn("google oauth: invalid or missing state parameter", nil)
+		http.Redirect(w, r, h.appURL+"/login?error=oauth_failed", http.StatusTemporaryRedirect)
+		return
+	}
+	// Clear the state cookie
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oauth_state",
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   h.secureCookie,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+	})
+
 	code := r.URL.Query().Get("code")
 	if code == "" {
 		applogger.Warn("google oauth: missing code parameter", nil)
@@ -337,12 +390,17 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	client := h.oauthCfg.Client(context.Background(), token)
 	resp, err := client.Get("https://www.googleapis.com/oauth2/v3/userinfo")
-	if err != nil || resp.StatusCode != http.StatusOK {
-		applogger.Error("google oauth: userinfo fetch failed", map[string]any{"err": err, "status": resp.StatusCode})
+	if err != nil {
+		applogger.Error("google oauth: userinfo fetch failed", map[string]any{"err": err.Error()})
 		http.Redirect(w, r, h.appURL+"/login?error=oauth_failed", http.StatusTemporaryRedirect)
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		applogger.Error("google oauth: userinfo non-200 response", map[string]any{"status": resp.StatusCode})
+		http.Redirect(w, r, h.appURL+"/login?error=oauth_failed", http.StatusTemporaryRedirect)
+		return
+	}
 
 	var info struct {
 		Sub     string `json:"sub"`
