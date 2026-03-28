@@ -29,6 +29,11 @@ func Subscribe(clients *grpcclient.Clients, store *auth.Store) http.HandlerFunc 
 		cleanSvcName := vars["serviceName"]
 		internalSvcName := applyNS(ns, cleanSvcName)
 
+		if !checkPerm(r, user, ns, "live.view", store) {
+			writeError(w, http.StatusForbidden, "permission denied")
+			return
+		}
+
 		instanceID := r.URL.Query().Get("instance_id")
 		if instanceID == "" {
 			instanceID = "web-bff"

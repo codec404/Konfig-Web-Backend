@@ -17,17 +17,35 @@ import (
 // ── Namespace helpers ─────────────────────────────────────────────────────────
 
 // resolveNS returns the effective namespace for the request.
-// If the X-Org-ID header is present and the user is a member of that org,
-// the org namespace is returned. Otherwise falls back to user.Namespace().
+// Priority 1: X-Org-ID header (UUID)
+// Priority 2: X-Org-Slug header (subdomain slug)
+// Otherwise falls back to user.Namespace().
 func resolveNS(r *http.Request, user *auth.User, store *auth.Store) string {
+	// Priority 1: X-Org-ID header (UUID)
 	orgID := r.Header.Get("X-Org-ID")
-	if orgID == "" {
-		return user.Namespace()
+	if orgID != "" {
+		if _, err := store.GetOrgMembership(user.ID, orgID); err == nil {
+			return "o__" + orgID + "__"
+		}
 	}
-	if _, err := store.GetOrgMembership(user.ID, orgID); err != nil {
-		return user.Namespace()
+	// Priority 2: X-Org-Slug header (subdomain slug) or query param (for WebSocket connections)
+	orgSlug := r.Header.Get("X-Org-Slug")
+	if orgSlug == "" {
+		orgSlug = r.URL.Query().Get("org_slug")
 	}
-	return "o__" + orgID + "__"
+	if orgSlug != "" {
+		if org, err := store.FindOrgBySlug(orgSlug); err == nil {
+			if _, err := store.GetOrgMembership(user.ID, org.ID); err == nil {
+				return "o__" + org.ID + "__"
+			}
+		}
+	}
+	// No org context in headers — use personal (individual) namespace.
+	// Super admins have no namespace restriction.
+	if user.Role == auth.RoleSuperAdmin {
+		return ""
+	}
+	return "u__" + user.ID + "__"
 }
 
 // applyNS prepends a namespace prefix to an external service name.
@@ -56,6 +74,25 @@ func ownsConfigID(ns, configID string) bool {
 		return true
 	}
 	return strings.HasPrefix(configID, ns)
+}
+
+// checkPerm returns true if the user is allowed. Admins/SA always pass.
+// Only enforced when there IS an org context (orgNS starts with "o__").
+func checkPerm(r *http.Request, user *auth.User, orgNS string, perm string, store *auth.Store) bool {
+	if user.Role == auth.RoleSuperAdmin || user.Role == auth.RoleAdmin {
+		return true
+	}
+	if !strings.HasPrefix(orgNS, "o__") {
+		return true // personal mode — no org permission applies
+	}
+	// Extract orgID from namespace "o__<orgId>__"
+	orgID := strings.TrimPrefix(orgNS, "o__")
+	orgID = strings.TrimSuffix(orgID, "__")
+	// Also check org-specific role (user might be admin in this org)
+	if membership, err := store.GetOrgMembership(user.ID, orgID); err == nil && membership.Role == auth.RoleAdmin {
+		return true
+	}
+	return store.HasOrgPermission(orgID, user.ID, perm)
 }
 
 // canAccessService returns true if the user can access the given clean service name
@@ -180,6 +217,11 @@ func ListServices(clients *grpcclient.Clients, store *auth.Store) http.HandlerFu
 		user := auth.UserFromContext(r.Context())
 		ns := resolveNS(r, user, store)
 
+		if !checkPerm(r, user, ns, "services.view", store) {
+			writeError(w, http.StatusForbidden, "permission denied")
+			return
+		}
+
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
@@ -236,6 +278,11 @@ func ListNamedConfigs(clients *grpcclient.Clients, store *auth.Store) http.Handl
 		cleanSvcName := vars["serviceName"]
 		internalSvcName := applyNS(ns, cleanSvcName)
 
+		if !checkPerm(r, user, ns, "services.view", store) {
+			writeError(w, http.StatusForbidden, "permission denied")
+			return
+		}
+
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
@@ -268,6 +315,11 @@ func ListConfigs(clients *grpcclient.Clients, store *auth.Store) http.HandlerFun
 		cleanSvcName := vars["serviceName"]
 		configName := vars["configName"]
 		internalSvcName := applyNS(ns, cleanSvcName)
+
+		if !checkPerm(r, user, ns, "services.view", store) {
+			writeError(w, http.StatusForbidden, "permission denied")
+			return
+		}
 
 		limit := int32(20)
 		offset := int32(0)
@@ -321,6 +373,10 @@ func GetConfig(clients *grpcclient.Clients, store *auth.Store) http.HandlerFunc 
 			writeError(w, http.StatusForbidden, "access denied")
 			return
 		}
+		if !checkPerm(r, user, ns, "services.view", store) {
+			writeError(w, http.StatusForbidden, "permission denied")
+			return
+		}
 
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
@@ -350,6 +406,12 @@ func UploadConfig(clients *grpcclient.Clients, store *auth.Store) http.HandlerFu
 	return func(w http.ResponseWriter, r *http.Request) {
 		user := auth.UserFromContext(r.Context())
 		ns := resolveNS(r, user, store)
+
+		if !checkPerm(r, user, ns, "configs.create", store) {
+			writeError(w, http.StatusForbidden, "permission denied")
+			return
+		}
+
 		var body struct {
 			ServiceName string `json:"service_name"`
 			ConfigName  string `json:"config_name"`
@@ -414,6 +476,10 @@ func DeleteConfig(clients *grpcclient.Clients, store *auth.Store) http.HandlerFu
 
 		if !ownsConfigID(ns, configID) {
 			writeError(w, http.StatusForbidden, "access denied")
+			return
+		}
+		if !checkPerm(r, user, ns, "configs.delete", store) {
+			writeError(w, http.StatusForbidden, "permission denied")
 			return
 		}
 

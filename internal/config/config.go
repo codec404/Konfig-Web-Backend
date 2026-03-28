@@ -15,6 +15,8 @@ type Config struct {
 	JWTSecret    string
 	AppURL       string
 	SecureCookie bool
+	BaseDomain   string
+	CookieDomain string
 
 	// Google OAuth
 	GoogleClientID     string
@@ -25,8 +27,9 @@ type Config struct {
 	SuperAdminEmail string
 
 	// Resend mailer (leave ResendAPIKey empty to log OTPs to stdout instead)
-	ResendAPIKey string
-	ResendFrom   string
+	ResendAPIKey   string
+	ResendFrom     string
+	DeveloperEmail string
 }
 
 func Load() *Config {
@@ -41,6 +44,8 @@ func Load() *Config {
 		JWTSecret:    getEnv("JWT_SECRET", "change-me-in-production"),
 		AppURL:       getEnv("APP_URL", "http://localhost:5173"),
 		SecureCookie: getEnv("SECURE_COOKIE", "false") == "true",
+		BaseDomain:   getEnv("BASE_DOMAIN", "localhost"),
+		CookieDomain: getEnv("COOKIE_DOMAIN", ""),
 
 		GoogleClientID:     getEnv("GOOGLE_CLIENT_ID", ""),
 		GoogleClientSecret: getEnv("GOOGLE_CLIENT_SECRET", ""),
@@ -48,8 +53,9 @@ func Load() *Config {
 		SuperAdminName:  getEnv("SUPER_ADMIN_NAME", "Super Admin"),
 		SuperAdminEmail: getEnv("SUPER_ADMIN_EMAIL", "admin@konfig.local"),
 
-		ResendAPIKey: getEnv("RESEND_API_KEY", ""),
-		ResendFrom:   getEnv("RESEND_FROM", "noreply@konfig.org.in"),
+		ResendAPIKey:   getEnv("RESEND_API_KEY", ""),
+		ResendFrom:     getEnv("RESEND_FROM", "noreply@konfig.org.in"),
+		DeveloperEmail: getEnv("DEVELOPER_EMAIL", "saptarshimemari072@gmail.com"),
 	}
 }
 

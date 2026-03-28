@@ -1,0 +1,41 @@
+{{define "body"}}
+  <!-- Icon -->
+  <div style="text-align:center;margin-bottom:24px;">
+    <div style="display:inline-block;width:60px;height:60px;line-height:60px;border-radius:50%;background:rgba(99,102,241,0.15);font-size:28px;text-align:center;">
+      &#127970;
+    </div>
+  </div>
+
+  <h2 style="margin:0 0 8px;font-size:20px;font-weight:700;color:#e0e0f0;text-align:center;">
+    You&#39;ve been invited!
+  </h2>
+  <p style="margin:0 0 6px;font-size:14px;color:#888899;line-height:1.6;text-align:center;">
+    <strong style="color:#a0a0bb;">{{.InviterName}}</strong> has invited you to join
+  </p>
+  <p style="margin:0 0 28px;font-size:18px;font-weight:700;color:#6366f1;text-align:center;">
+    {{.OrgName}}
+  </p>
+
+  <!-- CTA -->
+  <div style="text-align:center;margin-bottom:28px;">
+    <a href="{{.AcceptURL}}"
+       style="display:inline-block;padding:13px 36px;background:linear-gradient(135deg,#6366f1,#818cf8);color:#ffffff;font-size:14px;font-weight:600;text-decoration:none;border-radius:8px;letter-spacing:0.2px;">
+      Accept Invitation &#8594;
+    </a>
+  </div>
+
+  <!-- Fallback URL -->
+  <div style="background:#1a1a28;border:1px solid #2a2a3a;border-radius:8px;padding:14px 18px;margin-bottom:20px;">
+    <p style="margin:0 0 6px;font-size:12px;color:#555577;">
+      &#128336;&nbsp; This invitation expires in <strong style="color:#a0a0bb;">7 days</strong>.
+    </p>
+    <p style="margin:0;font-size:12px;color:#555577;line-height:1.6;">
+      If the button doesn&#39;t work, copy this link into your browser:<br/>
+      <a href="{{.AcceptURL}}" style="color:#6366f1;word-break:break-all;font-size:11px;">{{.AcceptURL}}</a>
+    </p>
+  </div>
+
+  <p style="margin:0;font-size:12px;color:#444466;text-align:center;">
+    If you weren&#39;t expecting this invitation, you can safely ignore this email.
+  </p>
+{{end}}

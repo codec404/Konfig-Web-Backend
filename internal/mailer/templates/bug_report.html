@@ -1,0 +1,49 @@
+{{define "body"}}
+  <!-- Header row -->
+  <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+    <tr>
+      <td width="48" style="vertical-align:middle;padding-right:14px;">
+        <span style="font-size:32px;">&#128027;</span>
+      </td>
+      <td style="vertical-align:middle;">
+        <h2 style="margin:0;font-size:18px;font-weight:700;color:#e0e0f0;">New Issue Reported</h2>
+        <p style="margin:3px 0 0;font-size:12px;color:#555577;">Someone submitted a report on Konfig</p>
+      </td>
+    </tr>
+  </table>
+
+  <!-- Details card -->
+  <div style="background:#1a1a28;border:1px solid #2a2a3a;border-radius:8px;overflow:hidden;margin-bottom:20px;">
+
+    <!-- Issue type -->
+    <div style="padding:14px 18px;border-bottom:1px solid #2a2a3a;">
+      <p style="margin:0 0 6px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;color:#555577;">Issue Type</p>
+      <span style="display:inline-block;padding:3px 10px;border-radius:4px;font-size:12px;font-weight:600;color:{{.TypeColor}};background:{{.TypeBg}};">
+        {{.TypeLabel}}
+      </span>
+    </div>
+
+    <!-- Title -->
+    <div style="padding:14px 18px;border-bottom:1px solid #2a2a3a;">
+      <p style="margin:0 0 6px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;color:#555577;">Title</p>
+      <p style="margin:0;font-size:14px;font-weight:600;color:#e0e0f0;">{{.Title}}</p>
+    </div>
+
+    <!-- Reporter -->
+    <div style="padding:14px 18px;border-bottom:1px solid #2a2a3a;">
+      <p style="margin:0 0 6px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;color:#555577;">Reporter</p>
+      <a href="mailto:{{.ReporterEmail}}" style="font-size:13px;color:#6366f1;text-decoration:none;">{{.ReporterEmail}}</a>
+    </div>
+
+    <!-- Description -->
+    <div style="padding:14px 18px;">
+      <p style="margin:0 0 8px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;color:#555577;">Description</p>
+      <p style="margin:0;font-size:13px;color:#a0a0bb;line-height:1.7;white-space:pre-line;">{{.Description}}</p>
+    </div>
+
+  </div>
+
+  <p style="margin:0;font-size:12px;color:#444466;text-align:center;">
+    Manage all reports in the Konfig SA Dashboard &rarr; Bug Reports
+  </p>
+{{end}}

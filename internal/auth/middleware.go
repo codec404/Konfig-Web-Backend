@@ -54,12 +54,45 @@ func RequireSuperAdmin() func(http.Handler) http.Handler {
 	}
 }
 
-// RequireOrgAdmin rejects requests from non-admin (and non-super-admin) users with 403.
-func RequireOrgAdmin() func(http.Handler) http.Handler {
+// RequireOrgAdmin checks that the requesting user is an admin in the org identified by
+// the X-Org-ID or X-Org-Slug request header. Super admins always pass.
+// If no org header is present it falls back to checking users.role (legacy path).
+func RequireOrgAdmin(store *Store) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			user := UserFromContext(r.Context())
-			if user == nil || (user.Role != RoleAdmin && user.Role != RoleSuperAdmin) {
+			if user == nil {
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+			if user.Role == RoleSuperAdmin {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Resolve org ID from request headers.
+			orgID := r.Header.Get("X-Org-ID")
+			if orgID == "" {
+				if slug := r.Header.Get("X-Org-Slug"); slug != "" {
+					if org, err := store.FindOrgBySlug(slug); err == nil {
+						orgID = org.ID
+					}
+				}
+			}
+
+			if orgID != "" {
+				// Check org-specific role from org_memberships.
+				membership, err := store.GetOrgMembership(user.ID, orgID)
+				if err != nil || membership.Role != RoleAdmin {
+					http.Error(w, `{"error":"forbidden: admin only"}`, http.StatusForbidden)
+					return
+				}
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// No org context — fall back to global role check.
+			if user.Role != RoleAdmin {
 				http.Error(w, `{"error":"forbidden: admin only"}`, http.StatusForbidden)
 				return
 			}

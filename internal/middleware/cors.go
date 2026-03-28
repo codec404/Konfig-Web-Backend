@@ -3,23 +3,24 @@ package middleware
 import (
 	"net/http"
 	"os"
+	"strings"
 )
 
-// CORS handles cross-origin requests. Uses a specific allowed origin with
-// credentials support (required for httpOnly cookie auth).
-func CORS(h http.Handler) http.Handler {
-	appURL := os.Getenv("APP_URL")
-	if appURL == "" {
-		appURL = "http://localhost:5173"
+func CORS(h http.Handler, baseDomain string) http.Handler {
+	if baseDomain == "" {
+		baseDomain = os.Getenv("BASE_DOMAIN")
+	}
+	if baseDomain == "" {
+		baseDomain = "localhost"
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if origin == appURL {
+		if isAllowedOrigin(origin, baseDomain) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 		}
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Org-ID, X-Org-Slug")
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -28,4 +29,21 @@ func CORS(h http.Handler) http.Handler {
 
 		h.ServeHTTP(w, r)
 	})
+}
+
+func isAllowedOrigin(origin, baseDomain string) bool {
+	if origin == "" {
+		return false
+	}
+	// Strip protocol
+	host := origin
+	if i := strings.Index(host, "://"); i >= 0 {
+		host = host[i+3:]
+	}
+	// Strip port
+	if i := strings.LastIndex(host, ":"); i >= 0 {
+		host = host[:i]
+	}
+	// Allow exact base domain or any subdomain of it
+	return host == baseDomain || strings.HasSuffix(host, "."+baseDomain)
 }

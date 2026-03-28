@@ -17,17 +17,34 @@ import (
 )
 
 type OrgHandler struct {
+	developerEmail string
 	store   *auth.Store
 	clients *grpcclient.Clients
 	mailer  *mailer.Mailer
 	appURL  string
 }
 
-func NewOrgHandler(store *auth.Store, clients *grpcclient.Clients, ml *mailer.Mailer, appURL string) *OrgHandler {
-	return &OrgHandler{store: store, clients: clients, mailer: ml, appURL: appURL}
+func NewOrgHandler(store *auth.Store, clients *grpcclient.Clients, ml *mailer.Mailer, appURL, developerEmail string) *OrgHandler {
+	return &OrgHandler{store: store, clients: clients, mailer: ml, appURL: appURL, developerEmail: developerEmail}
 }
 
 // ── Public ────────────────────────────────────────────────────────────────────
+
+// GetOrgBySlug resolves an org slug to org info (public endpoint for subdomain routing).
+// GET /api/public/orgs/by-slug/{slug}
+func (h *OrgHandler) GetOrgBySlug(w http.ResponseWriter, r *http.Request) {
+	slug := mux.Vars(r)["slug"]
+	org, err := h.store.FindOrgBySlug(slug)
+	if errors.Is(err, auth.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "org not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"org_id": org.ID, "org_name": org.Name, "slug": org.Slug})
+}
 
 // ListPublicOrgs returns org names for the signup page (no auth required).
 // GET /api/public/orgs
@@ -50,7 +67,7 @@ func (h *OrgHandler) ListPublicOrgs(w http.ResponseWriter, r *http.Request) {
 
 // ── Super admin: org management ───────────────────────────────────────────────
 
-// ListOrgs returns all organizations.
+// ListOrgs returns all organizations with member counts.
 // GET /api/admin/orgs
 func (h *OrgHandler) ListOrgs(w http.ResponseWriter, r *http.Request) {
 	orgs, err := h.store.ListOrgs()
@@ -58,10 +75,16 @@ func (h *OrgHandler) ListOrgs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	if orgs == nil {
-		orgs = []auth.Organization{}
+	type orgItem struct {
+		auth.Organization
+		MemberCount int `json:"member_count"`
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"orgs": orgs})
+	result := make([]orgItem, 0, len(orgs))
+	for _, o := range orgs {
+		members, _ := h.store.ListOrgMembers(o.ID)
+		result = append(result, orgItem{Organization: o, MemberCount: len(members)})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"orgs": result})
 }
 
 // CreateOrg creates a new organization and maps a first admin to it.
@@ -89,6 +112,12 @@ func (h *OrgHandler) CreateOrg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate the admin email exists before creating anything
+	if _, err := h.store.FindByEmail(req.FirstAdminEmail); err != nil {
+		writeError(w, http.StatusBadRequest, "no account found with that email")
+		return
+	}
+
 	org, err := h.store.CreateOrg(req.Name, caller.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -96,23 +125,9 @@ func (h *OrgHandler) CreateOrg(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.store.SetOrgFirstAdmin(req.FirstAdminEmail, org.ID); err != nil {
-		if errors.Is(err, auth.ErrNotFound) {
-			// User doesn't exist — auto-create. They log in via OTP.
-			localPart := strings.Split(req.FirstAdminEmail, "@")[0]
-			if _, err2 := h.store.AddUserToOrg(localPart, req.FirstAdminEmail, org.ID, auth.RoleAdmin); err2 != nil {
-				h.store.DeleteOrg(org.ID)
-				if errors.Is(err2, auth.ErrEmailTaken) {
-					writeError(w, http.StatusConflict, "email already registered")
-				} else {
-					writeError(w, http.StatusInternalServerError, "could not create admin user")
-				}
-				return
-			}
-		} else {
-			h.store.DeleteOrg(org.ID)
-			writeError(w, http.StatusInternalServerError, "internal error")
-			return
-		}
+		h.store.DeleteOrg(org.ID)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]any{"org": org})
@@ -126,34 +141,69 @@ func (h *OrgHandler) ListAllUsers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	orgs, _ := h.store.ListOrgs()
-	orgMap := make(map[string]string, len(orgs))
-	for _, o := range orgs {
+	allOrgs, _ := h.store.ListOrgs()
+	orgMap := make(map[string]string, len(allOrgs))
+	for _, o := range allOrgs {
 		orgMap[o.ID] = o.Name
 	}
+
+	// Build per-user invite org memberships map
+	inviteOrgs := make(map[string][]string)
+	if rows, err := h.store.DB().Query(
+		`SELECT om.user_id, o.name FROM org_memberships om
+		 JOIN organizations o ON o.id = om.org_id WHERE om.status = 'active'`,
+	); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var uid, oname string
+			if rows.Scan(&uid, &oname) == nil {
+				inviteOrgs[uid] = append(inviteOrgs[uid], oname)
+			}
+		}
+	}
+
 	type userItem struct {
-		ID           string `json:"id"`
-		Name         string `json:"name"`
-		Email        string `json:"email"`
-		Role         string `json:"role"`
-		AccountType  string `json:"account_type"`
-		OrgID        string `json:"org_id"`
-		OrgName      string `json:"org_name"`
-		MemberStatus string `json:"member_status"`
-		CreatedAt    string `json:"created_at"`
+		ID           string   `json:"id"`
+		Name         string   `json:"name"`
+		Email        string   `json:"email"`
+		Role         string   `json:"role"`
+		OrgID        string   `json:"org_id"`
+		Orgs         []string `json:"orgs"`
+		MemberStatus string   `json:"member_status"`
+		CreatedAt    string   `json:"created_at"`
+		Blocked      bool     `json:"blocked"`
+		AvatarURL    string   `json:"avatar_url,omitempty"`
 	}
 	items := make([]userItem, 0, len(users))
 	for _, u := range users {
+		// Collect all org names for this user
+		orgNames := make([]string, 0)
+		if name := orgMap[u.OrgID]; name != "" {
+			orgNames = append(orgNames, name)
+		}
+		for _, n := range inviteOrgs[u.ID] {
+			// Avoid duplicating primary org
+			if orgMap[u.OrgID] != n {
+				orgNames = append(orgNames, n)
+			}
+		}
+
+		status := string(u.MemberStatus)
+		if status == "" {
+			status = "active"
+		}
+
 		items = append(items, userItem{
 			ID:           u.ID,
 			Name:         u.Name,
 			Email:        u.Email,
 			Role:         string(u.Role),
-			AccountType:  string(u.AccountType),
 			OrgID:        u.OrgID,
-			OrgName:      orgMap[u.OrgID],
-			MemberStatus: string(u.MemberStatus),
+			Orgs:         orgNames,
+			MemberStatus: status,
 			CreatedAt:    u.CreatedAt.UTC().Format(time.RFC3339),
+			Blocked:      u.BlockedAt != nil,
+			AvatarURL:    u.AvatarURL,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"users": items})
@@ -185,10 +235,19 @@ func (h *OrgHandler) ListOrgServices(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"services": services})
 }
 
-// DeleteOrg soft-deletes an organization.
+// DeleteOrg soft-deletes an organization. Blocked if any members exist.
 // DELETE /api/admin/orgs/{orgId}
 func (h *OrgHandler) DeleteOrg(w http.ResponseWriter, r *http.Request) {
 	orgID := mux.Vars(r)["orgId"]
+	members, err := h.store.ListOrgMembers(orgID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if len(members) > 0 {
+		writeError(w, http.StatusConflict, "cannot delete an organization with existing members")
+		return
+	}
 	if err := h.store.DeleteOrg(orgID); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
@@ -211,12 +270,11 @@ func (h *OrgHandler) GetOrgMembers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"members": members})
 }
 
-// AddUser creates or links a user to an org (super admin only).
+// AddUser links an existing user to an org (super admin only).
 // POST /api/admin/users
-// Body: {"name","email","org_id","role"}
+// Body: {"email","org_id","role"}
 func (h *OrgHandler) AddUser(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name  string    `json:"name"`
 		Email string    `json:"email"`
 		OrgID string    `json:"org_id"`
 		Role  auth.Role `json:"role"`
@@ -225,8 +283,8 @@ func (h *OrgHandler) AddUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request")
 		return
 	}
-	if req.Name == "" || req.Email == "" || req.OrgID == "" {
-		writeError(w, http.StatusBadRequest, "name, email, and org_id are required")
+	if req.Email == "" || req.OrgID == "" {
+		writeError(w, http.StatusBadRequest, "email and org_id are required")
 		return
 	}
 	if req.Role == "" {
@@ -236,21 +294,15 @@ func (h *OrgHandler) AddUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "role must be 'admin' or 'user'")
 		return
 	}
-	user, err := h.store.AddUserToOrg(req.Name, req.Email, req.OrgID, req.Role)
-	if errors.Is(err, auth.ErrEmailTaken) {
-		writeError(w, http.StatusConflict, "email already registered")
-		return
-	}
-	if err != nil {
+	if err := h.store.LinkExistingUserToOrg(req.Email, req.OrgID, req.Role); err != nil {
+		if errors.Is(err, auth.ErrNotFound) {
+			writeError(w, http.StatusBadRequest, "no account found with that email")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"user": map[string]any{
-		"id":    user.ID,
-		"name":  user.Name,
-		"email": user.Email,
-		"role":  user.Role,
-	}})
+	writeJSON(w, http.StatusCreated, map[string]any{"ok": true})
 }
 
 // RemoveUser soft-deletes a user (super admin can remove any user).
@@ -298,7 +350,7 @@ func (h *OrgHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 // GET /api/org/pending
 func (h *OrgHandler) ListPending(w http.ResponseWriter, r *http.Request) {
 	caller := auth.UserFromContext(r.Context())
-	members, err := h.store.ListPendingMembers(caller.OrgID)
+	members, err := h.store.ListPendingMembers(callerOrgID(r, caller, h.store))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
@@ -313,7 +365,7 @@ func (h *OrgHandler) ListPending(w http.ResponseWriter, r *http.Request) {
 // GET /api/org/members
 func (h *OrgHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
 	caller := auth.UserFromContext(r.Context())
-	members, err := h.store.ListOrgMembers(caller.OrgID)
+	members, err := h.store.ListOrgMembers(callerOrgID(r, caller, h.store))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
@@ -329,7 +381,7 @@ func (h *OrgHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
 func (h *OrgHandler) ApproveMember(w http.ResponseWriter, r *http.Request) {
 	caller := auth.UserFromContext(r.Context())
 	userID := mux.Vars(r)["userId"]
-	if err := h.store.ApproveMember(caller.OrgID, userID); err != nil {
+	if err := h.store.ApproveMember(callerOrgID(r, caller, h.store), userID); err != nil {
 		if errors.Is(err, auth.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "pending member not found")
 			return
@@ -345,7 +397,7 @@ func (h *OrgHandler) ApproveMember(w http.ResponseWriter, r *http.Request) {
 func (h *OrgHandler) RejectMember(w http.ResponseWriter, r *http.Request) {
 	caller := auth.UserFromContext(r.Context())
 	userID := mux.Vars(r)["userId"]
-	if err := h.store.RejectMember(caller.OrgID, userID); err != nil {
+	if err := h.store.RejectMember(callerOrgID(r, caller, h.store), userID); err != nil {
 		if errors.Is(err, auth.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "pending member not found")
 			return
@@ -361,7 +413,7 @@ func (h *OrgHandler) RejectMember(w http.ResponseWriter, r *http.Request) {
 func (h *OrgHandler) RemoveOrgMember(w http.ResponseWriter, r *http.Request) {
 	caller := auth.UserFromContext(r.Context())
 	userID := mux.Vars(r)["userId"]
-	if err := h.store.RemoveFromOrg(caller.Role, caller.OrgID, userID); err != nil {
+	if err := h.store.RemoveFromOrg(caller.Role, callerOrgID(r, caller, h.store), userID); err != nil {
 		if errors.Is(err, auth.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "user not found")
 			return
@@ -384,7 +436,7 @@ func (h *OrgHandler) UpdateOrgMember(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request")
 		return
 	}
-	if err := h.store.UpdateUserCreds(caller.Role, caller.OrgID, userID, req.Name); err != nil {
+	if err := h.store.UpdateUserCreds(caller.Role, callerOrgID(r, caller, h.store), userID, req.Name); err != nil {
 		if errors.Is(err, auth.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "user not found")
 			return
@@ -402,7 +454,7 @@ func (h *OrgHandler) UpdateOrgMember(w http.ResponseWriter, r *http.Request) {
 func (h *OrgHandler) ListServiceVisibility(w http.ResponseWriter, r *http.Request) {
 	caller := auth.UserFromContext(r.Context())
 	serviceName := mux.Vars(r)["serviceName"]
-	vis, err := h.store.ListServiceVisibility(caller.OrgID, serviceName)
+	vis, err := h.store.ListServiceVisibility(callerOrgID(r, caller, h.store), serviceName)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
@@ -426,7 +478,7 @@ func (h *OrgHandler) GrantServiceVisibility(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "user_id is required")
 		return
 	}
-	if err := h.store.GrantServiceVisibility(caller.OrgID, req.UserID, serviceName, caller.ID); err != nil {
+	if err := h.store.GrantServiceVisibility(callerOrgID(r, caller, h.store), req.UserID, serviceName, caller.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -440,7 +492,7 @@ func (h *OrgHandler) RevokeServiceVisibility(w http.ResponseWriter, r *http.Requ
 	vars := mux.Vars(r)
 	serviceName := vars["serviceName"]
 	userID := vars["userId"]
-	if err := h.store.RevokeServiceVisibility(caller.OrgID, userID, serviceName); err != nil {
+	if err := h.store.RevokeServiceVisibility(callerOrgID(r, caller, h.store), userID, serviceName); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -571,7 +623,8 @@ func (h *OrgHandler) InviteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := h.store.InviteToOrg(caller.OrgID, req.Email, string(req.Role), caller.ID)
+	orgID := callerOrgID(r, caller, h.store)
+	token, err := h.store.InviteToOrg(orgID, req.Email, string(req.Role), caller.ID)
 	if errors.Is(err, auth.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "user not registered")
 		return
@@ -581,12 +634,12 @@ func (h *OrgHandler) InviteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("[InviteUser] unexpected error for org %s, email %s: %v", caller.OrgID, req.Email, err)
+		log.Printf("[InviteUser] unexpected error for org %s, email %s: %v", orgID, req.Email, err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
-	org, _ := h.store.GetOrg(caller.OrgID)
+	org, _ := h.store.GetOrg(orgID)
 	orgName := ""
 	if org != nil {
 		orgName = org.Name
@@ -601,7 +654,7 @@ func (h *OrgHandler) InviteUser(w http.ResponseWriter, r *http.Request) {
 // GET /api/org/invites
 func (h *OrgHandler) ListOrgInvites(w http.ResponseWriter, r *http.Request) {
 	caller := auth.UserFromContext(r.Context())
-	invites, err := h.store.ListOrgInvites(caller.OrgID)
+	invites, err := h.store.ListOrgInvites(callerOrgID(r, caller, h.store))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
@@ -661,4 +714,322 @@ func (h *OrgHandler) GetOrgServicesForUser(w http.ResponseWriter, r *http.Reques
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"services": services, "org_id": orgID, "role": membership.Role})
+}
+
+// BlockUser blocks a user (super admin only).
+// POST /api/admin/users/{userId}/block
+func (h *OrgHandler) BlockUser(w http.ResponseWriter, r *http.Request) {
+	userID := mux.Vars(r)["userId"]
+	if err := h.store.BlockUser(userID); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// UnblockUser unblocks a user (super admin only).
+// POST /api/admin/users/{userId}/unblock
+func (h *OrgHandler) UnblockUser(w http.ResponseWriter, r *http.Request) {
+	userID := mux.Vars(r)["userId"]
+	if err := h.store.UnblockUser(userID); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// ChangeOrgMemberRole changes a member's role within the admin's org.
+// PUT /api/org/members/{userId}/role
+// Body: {"role": "admin"|"user"}
+func (h *OrgHandler) ChangeOrgMemberRole(w http.ResponseWriter, r *http.Request) {
+	caller := auth.UserFromContext(r.Context())
+	userID := mux.Vars(r)["userId"]
+	orgID := callerOrgID(r, caller, h.store)
+	var req struct {
+		Role auth.Role `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	if err := h.store.ChangeOrgMemberRole(orgID, userID, req.Role); err != nil {
+		if errors.Is(err, auth.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "member not found")
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// RemoveUserFromOrg removes a user from a specific org without deleting the account (super admin only).
+// For admins: allowed only if multiple admins exist OR the admin is the sole member.
+// DELETE /api/admin/orgs/{orgId}/members/{userId}
+func (h *OrgHandler) RemoveUserFromOrg(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	orgID, userID := vars["orgId"], vars["userId"]
+
+	members, err := h.store.ListOrgMembers(orgID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// Find the target member
+	var targetRole auth.Role
+	found := false
+	for _, m := range members {
+		if m.UserID == userID {
+			targetRole = m.Role
+			found = true
+			break
+		}
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "user is not a member of this org")
+		return
+	}
+
+	if targetRole == auth.RoleAdmin {
+		adminCount := 0
+		for _, m := range members {
+			if m.Role == auth.RoleAdmin {
+				adminCount++
+			}
+		}
+		// Block removal if: only one admin AND other members exist
+		if adminCount == 1 && len(members) > 1 {
+			writeError(w, http.StatusConflict, "cannot remove the only admin while other members exist")
+			return
+		}
+	}
+
+	if err := h.store.RemoveUserFromOrg(orgID, userID); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// ── Org permissions ────────────────────────────────────────────────────────────
+
+// resolveOrgIDFromRequest extracts the org ID from X-Org-ID or X-Org-Slug headers.
+func resolveOrgIDFromRequest(r *http.Request, store *auth.Store) string {
+	if id := r.Header.Get("X-Org-ID"); id != "" {
+		return id
+	}
+	if slug := r.Header.Get("X-Org-Slug"); slug != "" {
+		if org, err := store.FindOrgBySlug(slug); err == nil {
+			return org.ID
+		}
+	}
+	return ""
+}
+
+// callerOrgID resolves the effective org ID for the request.
+// Prefers request headers (X-Org-ID / X-Org-Slug) over caller.OrgID so that
+// admins who belong to multiple orgs operate on the correct one.
+func callerOrgID(r *http.Request, caller *auth.User, store *auth.Store) string {
+	if id := resolveOrgIDFromRequest(r, store); id != "" {
+		return id
+	}
+	return caller.OrgID
+}
+
+// GetMemberPermissions returns a member's org permission grants.
+// GET /api/org/members/{userId}/permissions
+func (h *OrgHandler) GetMemberPermissions(w http.ResponseWriter, r *http.Request) {
+	userID := mux.Vars(r)["userId"]
+	caller := auth.UserFromContext(r.Context())
+	orgID := callerOrgID(r, caller, h.store)
+	if orgID == "" {
+		writeError(w, http.StatusBadRequest, "org context required")
+		return
+	}
+	perms, err := h.store.GetUserPermissions(orgID, userID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"permissions": perms})
+}
+
+// SetMemberPermissions replaces a member's org permission grants.
+// PUT /api/org/members/{userId}/permissions
+func (h *OrgHandler) SetMemberPermissions(w http.ResponseWriter, r *http.Request) {
+	caller := auth.UserFromContext(r.Context())
+	userID := mux.Vars(r)["userId"]
+	orgID := callerOrgID(r, caller, h.store)
+	if orgID == "" {
+		writeError(w, http.StatusBadRequest, "org context required")
+		return
+	}
+	var req struct {
+		Permissions []string `json:"permissions"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if req.Permissions == nil {
+		req.Permissions = []string{}
+	}
+	if err := h.store.SetUserPermissions(orgID, userID, caller.ID, req.Permissions); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// GetMyOrgPermissions returns the calling user's permissions (or all perms if admin).
+// GET /api/orgs/{orgId}/my-permissions
+func (h *OrgHandler) GetMyOrgPermissions(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	orgID := mux.Vars(r)["orgId"]
+	// Check membership
+	membership, err := h.store.GetOrgMembership(user.ID, orgID)
+	if err != nil {
+		// Super admin can access any org
+		if user.Role == auth.RoleSuperAdmin {
+			allPerms := []string{
+				"services.view", "services.create",
+				"configs.create", "configs.delete",
+				"rollouts.view", "rollouts.manage",
+				"schemas.view", "schemas.manage",
+				"live.view",
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"permissions": allPerms, "is_admin": true})
+			return
+		}
+		writeError(w, http.StatusForbidden, "not a member")
+		return
+	}
+	// Admins have all permissions
+	if membership.Role == auth.RoleAdmin || user.Role == auth.RoleSuperAdmin {
+		allPerms := []string{
+			"services.view", "services.create",
+			"configs.create", "configs.delete",
+			"rollouts.view", "rollouts.manage",
+			"schemas.view", "schemas.manage",
+			"live.view",
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"permissions": allPerms, "is_admin": true})
+		return
+	}
+	perms, err := h.store.GetUserPermissions(orgID, user.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"permissions": perms, "is_admin": false})
+}
+
+// ── Bug reports ───────────────────────────────────────────────────────────────
+
+// SubmitBugReport creates a new bug report from the logged-in user.
+// POST /api/bugs
+func (h *OrgHandler) SubmitBugReport(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	var req struct {
+		IssueType   string `json:"issue_type"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	if req.Title == "" || req.Description == "" || req.IssueType == "" {
+		writeError(w, http.StatusBadRequest, "issue_type, title and description are required")
+		return
+	}
+	if err := h.store.CreateBugReport(user.ID, user.Email, req.IssueType, req.Title, req.Description); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if h.developerEmail != "" {
+		go h.mailer.SendBugReport(h.developerEmail, req.IssueType, req.Title, req.Description, user.Email)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// ListBugReports returns all bug reports (super admin only).
+// GET /api/admin/bugs
+func (h *OrgHandler) ListBugReports(w http.ResponseWriter, r *http.Request) {
+	reports, err := h.store.ListBugReports()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if reports == nil {
+		reports = []auth.BugReport{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"reports": reports})
+}
+
+// UpdateBugReportStatus updates the status of a bug report (super admin only).
+// PUT /api/admin/bugs/{reportId}/status
+func (h *OrgHandler) UpdateBugReportStatus(w http.ResponseWriter, r *http.Request) {
+	reportID := mux.Vars(r)["reportId"]
+	var req struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	if err := h.store.UpdateBugReportStatus(reportID, req.Status); err != nil {
+		if errors.Is(err, auth.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "report not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// ── Email preview (SA only, dev aid) ──────────────────────────────────────────
+
+// PreviewEmail renders an email template as HTML directly in the browser.
+// GET /api/admin/email-preview?template=otp|invite|bug_report
+func (h *OrgHandler) PreviewEmail(w http.ResponseWriter, r *http.Request) {
+	tmpl := r.URL.Query().Get("template")
+	var (
+		html string
+		err  error
+	)
+	switch tmpl {
+	case "otp":
+		html, err = mailer.RenderOTP("482917")
+	case "invite":
+		html, err = mailer.RenderInvite("Acme Corp", "Alice", "http://localhost:5173/invites/tok_preview123")
+	case "bug_report":
+		html, err = mailer.RenderBugReport(
+			"bug",
+			"Login page crashes on mobile Safari",
+			"Steps to reproduce:\n1. Open the login page on iPhone Safari 17\n2. Tap 'Send OTP'\n3. App freezes\n\nExpected: OTP sent\nActual: White screen",
+			"user@example.com",
+		)
+	default:
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`<!DOCTYPE html><html><body style="font-family:sans-serif;padding:32px;background:#0f0f17;color:#e0e0f0;">
+			<h2>Email Template Previews</h2>
+			<ul>
+				<li><a href="?template=otp" style="color:#6366f1;">OTP / Login</a></li>
+				<li><a href="?template=invite" style="color:#6366f1;">Org Invite</a></li>
+				<li><a href="?template=bug_report" style="color:#6366f1;">Bug Report</a></li>
+			</ul>
+		</body></html>`))
+		return
+	}
+	if err != nil {
+		http.Error(w, "render error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(html))
 }

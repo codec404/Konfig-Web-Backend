@@ -1,0 +1,27 @@
+{{define "body"}}
+  <h2 style="margin:0 0 8px;font-size:20px;font-weight:700;color:#e0e0f0;">Verify your identity</h2>
+  <p style="margin:0 0 28px;font-size:14px;color:#888899;line-height:1.6;">
+    Use the code below to complete your sign-in to Konfig.
+    It expires in <strong style="color:#a0a0bb;">15 minutes</strong>.
+  </p>
+
+  <!-- OTP code block -->
+  <div style="text-align:center;margin:0 0 28px;">
+    <div style="display:inline-block;padding:18px 40px;background:#1a1a28;border:1px solid #2a2a3a;border-radius:10px;">
+      {{range .Digits}}
+      <span style="display:inline-block;width:40px;height:48px;line-height:48px;text-align:center;font-size:26px;font-weight:700;color:#e0e0f0;background:#1e1e2e;border:1px solid #2a2a3a;border-radius:6px;margin:0 3px;">{{.}}</span>
+      {{end}}
+    </div>
+  </div>
+
+  <!-- Security notice -->
+  <div style="background:#1a1a28;border:1px solid #2a2a3a;border-left:3px solid #6366f1;border-radius:8px;padding:14px 18px;margin-bottom:24px;">
+    <p style="margin:0;font-size:12px;color:#888899;line-height:1.6;">
+      &#128274;&nbsp; Never share this code with anyone. Konfig will never ask for it over chat or phone.
+    </p>
+  </div>
+
+  <p style="margin:0;font-size:12px;color:#444466;text-align:center;">
+    If you didn&#39;t request this code, you can safely ignore this email &mdash; your account remains secure.
+  </p>
+{{end}}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,6 +23,9 @@ type Store struct {
 
 func NewStore(db *sql.DB) *Store {
 	return &Store{db: db}
+}
+
+func (s *Store) DB() *sql.DB { return s.db
 }
 
 func (s *Store) Migrate() error {
@@ -46,6 +50,9 @@ func (s *Store) Migrate() error {
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS org_id         TEXT`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS member_status  TEXT`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at     TIMESTAMPTZ`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS blocked_at     TIMESTAMPTZ`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS phone          TEXT`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url     TEXT`,
 		`ALTER TABLE users DROP COLUMN IF EXISTS password_hash`,
 	} {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -63,6 +70,20 @@ func (s *Store) Migrate() error {
 			deleted_at TIMESTAMPTZ
 		)
 	`); err != nil {
+		return err
+	}
+
+	// Idempotent org column additions
+	for _, stmt := range []string{
+		`ALTER TABLE organizations ADD COLUMN IF NOT EXISTS slug TEXT`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+
+	// Backfill slugs for existing orgs that don't have one.
+	if err := s.backfillOrgSlugs(); err != nil {
 		return err
 	}
 
@@ -131,6 +152,90 @@ func (s *Store) Migrate() error {
 		return err
 	}
 
+	// Org permissions (granular per-user per-org grants)
+	if _, err := s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS org_permissions (
+			id         TEXT PRIMARY KEY,
+			org_id     TEXT NOT NULL,
+			user_id    TEXT NOT NULL,
+			permission TEXT NOT NULL,
+			granted_by TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE (org_id, user_id, permission)
+		)
+	`); err != nil {
+		return err
+	}
+
+	// Bug reports
+	if _, err := s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS bug_reports (
+			id          TEXT PRIMARY KEY,
+			user_id     TEXT NOT NULL,
+			user_email  TEXT NOT NULL,
+			issue_type  TEXT NOT NULL,
+			title       TEXT NOT NULL,
+			description TEXT NOT NULL,
+			status      TEXT NOT NULL DEFAULT 'open',
+			created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// ── Bug reports ───────────────────────────────────────────────────────────────
+
+type BugReport struct {
+	ID          string    `json:"id"`
+	UserID      string    `json:"user_id"`
+	UserEmail   string    `json:"user_email"`
+	IssueType   string    `json:"issue_type"`
+	Title       string    `json:"title"`
+	Description string    `json:"description"`
+	Status      string    `json:"status"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+func (s *Store) CreateBugReport(userID, userEmail, issueType, title, description string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO bug_reports (id, user_id, user_email, issue_type, title, description)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		uuid.NewString(), userID, userEmail, issueType, title, description,
+	)
+	return err
+}
+
+func (s *Store) ListBugReports() ([]BugReport, error) {
+	rows, err := s.db.Query(
+		`SELECT id, user_id, user_email, issue_type, title, description, status, created_at
+		 FROM bug_reports ORDER BY created_at DESC`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var reports []BugReport
+	for rows.Next() {
+		var r BugReport
+		if err := rows.Scan(&r.ID, &r.UserID, &r.UserEmail, &r.IssueType, &r.Title, &r.Description, &r.Status, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		reports = append(reports, r)
+	}
+	return reports, rows.Err()
+}
+
+func (s *Store) UpdateBugReportStatus(id, status string) error {
+	res, err := s.db.Exec(`UPDATE bug_reports SET status = $1 WHERE id = $2`, status, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
 	return nil
 }
 
@@ -176,10 +281,10 @@ func (s *Store) VerifyAndConsumeOTP(email, code, purpose string) error {
 	return err
 }
 
-// FindActiveByEmail returns a non-deleted user by email.
+// FindActiveByEmail returns a non-deleted, non-blocked user by email.
 func (s *Store) FindActiveByEmail(email string) (*User, error) {
 	row := s.db.QueryRow(
-		`SELECT `+userSelectCols+` FROM users WHERE email = $1 AND deleted_at IS NULL`, email,
+		`SELECT `+userSelectCols+` FROM users WHERE email = $1 AND deleted_at IS NULL AND blocked_at IS NULL`, email,
 	)
 	u, err := scanUser(row)
 	if err == sql.ErrNoRows {
@@ -278,12 +383,42 @@ func (s *Store) FindByID(id string) (*User, error) {
 	return s.findByID(id)
 }
 
-// UpdateOwnCreds lets a user update their own name.
-func (s *Store) UpdateOwnCreds(userID, name string) error {
-	if name != "" {
-		if _, err := s.db.Exec(`UPDATE users SET name = $1 WHERE id = $2`, name, userID); err != nil {
-			return err
-		}
+// UpdateOwnCreds lets a user update their own profile fields.
+func (s *Store) UpdateOwnCreds(userID, name, phone, avatarURL string) error {
+	_, err := s.db.Exec(
+		`UPDATE users SET
+			name       = CASE WHEN $1 != '' THEN $1 ELSE name END,
+			phone      = CASE WHEN $2 != '' THEN $2 ELSE phone END,
+			avatar_url = CASE WHEN $3 != '' THEN $3 ELSE avatar_url END
+		WHERE id = $4`,
+		name, phone, avatarURL, userID,
+	)
+	return err
+}
+
+// SetAvatarURLIfEmpty sets avatar_url only when it is not already set (used for Google photo).
+func (s *Store) SetAvatarURLIfEmpty(userID, avatarURL string) error {
+	_, err := s.db.Exec(
+		`UPDATE users SET avatar_url = $1 WHERE id = $2 AND (avatar_url IS NULL OR avatar_url = '')`,
+		avatarURL, userID,
+	)
+	return err
+}
+
+// ChangeOrgMemberRole changes a user's role within a specific org (org_memberships.role).
+func (s *Store) ChangeOrgMemberRole(orgID, targetUserID string, newRole Role) error {
+	if newRole != RoleAdmin && newRole != RoleUser {
+		return errors.New("role must be admin or user")
+	}
+	res, err := s.db.Exec(
+		`UPDATE org_memberships SET role = $1 WHERE org_id = $2 AND user_id = $3`,
+		string(newRole), orgID, targetUserID,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
 	}
 	return nil
 }
@@ -363,28 +498,119 @@ func (s *Store) RemoveFromOrg(callerRole Role, callerOrgID, targetUserID string)
 	return s.SoftDeleteUser(callerRole, callerOrgID, targetUserID)
 }
 
+// IsBlocked returns true if the email belongs to an existing user with blocked_at set.
+// Returns false (not an error) when the email is not found — unknown emails are allowed through.
+func (s *Store) IsBlocked(email string) (bool, error) {
+	var blocked bool
+	err := s.db.QueryRow(
+		`SELECT blocked_at IS NOT NULL FROM users WHERE email = $1 AND deleted_at IS NULL`,
+		email,
+	).Scan(&blocked)
+	if err == sql.ErrNoRows {
+		return false, nil // unknown email — let LoginWithOTP handle it
+	}
+	return blocked, err
+}
+
+// BlockUser sets blocked_at for a user, preventing login.
+func (s *Store) BlockUser(userID string) error {
+	now := time.Now()
+	_, err := s.db.Exec(`UPDATE users SET blocked_at = $1 WHERE id = $2`, now, userID)
+	return err
+}
+
+// UnblockUser clears blocked_at, allowing login again.
+func (s *Store) UnblockUser(userID string) error {
+	_, err := s.db.Exec(`UPDATE users SET blocked_at = NULL WHERE id = $1`, userID)
+	return err
+}
+
+// RemoveUserFromOrg removes a user from a specific org without deleting the account.
+// Used by super admin — no role restrictions.
+// If this was their last org, downgrades them to an individual user.
+func (s *Store) RemoveUserFromOrg(orgID, userID string) error {
+	s.db.Exec(`DELETE FROM org_memberships WHERE org_id = $1 AND user_id = $2`, orgID, userID)
+	s.db.Exec(`UPDATE users SET org_id = '' WHERE id = $1 AND org_id = $2`, userID, orgID)
+	// Check remaining org memberships
+	var remaining int
+	s.db.QueryRow(
+		`SELECT COUNT(*) FROM org_memberships WHERE user_id = $1 AND status = 'active'`, userID,
+	).Scan(&remaining)
+	var primaryOrg string
+	s.db.QueryRow(`SELECT COALESCE(org_id,'') FROM users WHERE id = $1`, userID).Scan(&primaryOrg)
+	if remaining == 0 && primaryOrg == "" {
+		s.db.Exec(`UPDATE users SET role = 'user', account_type = 'individual', member_status = NULL WHERE id = $1`, userID)
+	}
+	return nil
+}
+
 // ── Organization management ───────────────────────────────────────────────────
 
 func (s *Store) CreateOrg(name, createdBy string) (*Organization, error) {
+	slug := generateOrgSlug(name)
 	org := &Organization{
 		ID:        uuid.NewString(),
 		Name:      name,
 		CreatedBy: createdBy,
+		Slug:      slug,
 		CreatedAt: time.Now(),
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO organizations (id, name, created_by) VALUES ($1, $2, $3)`,
-		org.ID, org.Name, org.CreatedBy,
+		`INSERT INTO organizations (id, name, created_by, slug) VALUES ($1, $2, $3, $4)`,
+		org.ID, org.Name, org.CreatedBy, slug,
 	)
 	return org, err
+}
+
+// backfillOrgSlugs generates slugs for any org that has slug = NULL.
+func (s *Store) backfillOrgSlugs() error {
+	rows, err := s.db.Query(`SELECT id, name FROM organizations WHERE slug IS NULL AND deleted_at IS NULL`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type row struct{ id, name string }
+	var orgs []row
+	for rows.Next() {
+		var o row
+		if err := rows.Scan(&o.id, &o.name); err != nil {
+			return err
+		}
+		orgs = append(orgs, o)
+	}
+	for _, o := range orgs {
+		slug := generateOrgSlug(o.name)
+		if _, err := s.db.Exec(`UPDATE organizations SET slug = $1 WHERE id = $2`, slug, o.id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func generateOrgSlug(name string) string {
+	name = strings.ToLower(name)
+	var b strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('-')
+		}
+	}
+	s := strings.Trim(b.String(), "-")
+	// collapse multiple dashes
+	for strings.Contains(s, "--") {
+		s = strings.ReplaceAll(s, "--", "-")
+	}
+	return s
 }
 
 func (s *Store) GetOrg(orgID string) (*Organization, error) {
 	org := &Organization{}
 	err := s.db.QueryRow(
-		`SELECT id, name, created_by, created_at FROM organizations WHERE id = $1 AND deleted_at IS NULL`,
+		`SELECT id, name, COALESCE(slug,''), created_by, created_at FROM organizations WHERE id = $1 AND deleted_at IS NULL`,
 		orgID,
-	).Scan(&org.ID, &org.Name, &org.CreatedBy, &org.CreatedAt)
+	).Scan(&org.ID, &org.Name, &org.Slug, &org.CreatedBy, &org.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
 	}
@@ -393,7 +619,7 @@ func (s *Store) GetOrg(orgID string) (*Organization, error) {
 
 func (s *Store) ListOrgs() ([]Organization, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, created_by, created_at FROM organizations WHERE deleted_at IS NULL ORDER BY created_at DESC`,
+		`SELECT id, name, COALESCE(slug,''), created_by, created_at FROM organizations WHERE deleted_at IS NULL ORDER BY created_at DESC`,
 	)
 	if err != nil {
 		return nil, err
@@ -402,12 +628,24 @@ func (s *Store) ListOrgs() ([]Organization, error) {
 	var orgs []Organization
 	for rows.Next() {
 		var o Organization
-		if err := rows.Scan(&o.ID, &o.Name, &o.CreatedBy, &o.CreatedAt); err != nil {
+		if err := rows.Scan(&o.ID, &o.Name, &o.Slug, &o.CreatedBy, &o.CreatedAt); err != nil {
 			return nil, err
 		}
 		orgs = append(orgs, o)
 	}
 	return orgs, rows.Err()
+}
+
+func (s *Store) FindOrgBySlug(slug string) (*Organization, error) {
+	org := &Organization{}
+	err := s.db.QueryRow(
+		`SELECT id, name, COALESCE(slug,''), created_by, created_at FROM organizations WHERE slug = $1 AND deleted_at IS NULL`,
+		slug,
+	).Scan(&org.ID, &org.Name, &org.Slug, &org.CreatedBy, &org.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	return org, err
 }
 
 func (s *Store) DeleteOrg(orgID string) error {
@@ -416,56 +654,53 @@ func (s *Store) DeleteOrg(orgID string) error {
 	return err
 }
 
-// SetOrgFirstAdmin promotes an existing user to admin of the given org.
-// Called by super admin when creating an org with an existing user email.
-func (s *Store) SetOrgFirstAdmin(email, orgID string) error {
+// LinkExistingUserToOrg finds an existing user by email and adds them to the org
+// with the given role. Returns ErrNotFound if no user with that email exists.
+func (s *Store) LinkExistingUserToOrg(email, orgID string, role Role) error {
 	u, err := s.findByEmail(email)
 	if err != nil {
 		return ErrNotFound
 	}
+	// Only update org-level fields on the users row — never touch users.role.
+	if _, err := s.db.Exec(
+		`UPDATE users SET account_type = 'org', member_status = 'approved', org_id = $2 WHERE id = $1`,
+		u.ID, orgID,
+	); err != nil {
+		return err
+	}
 	_, err = s.db.Exec(
-		`UPDATE users SET org_id = $1, role = 'admin', account_type = 'org', member_status = 'approved' WHERE id = $2`,
-		orgID, u.ID,
+		`INSERT INTO org_memberships (id, org_id, user_id, role, status, invited_by)
+		 VALUES ($1, $2, $3, $4, 'active', $3)
+		 ON CONFLICT (org_id, user_id) DO UPDATE SET role = $4, status = 'active'`,
+		uuid.NewString(), orgID, u.ID, string(role),
 	)
 	return err
 }
 
-// AddUserToOrg creates a new user directly into an org with a given role (used by super admin).
-func (s *Store) AddUserToOrg(name, email, orgID string, role Role) (*User, error) {
-	var exists bool
-	s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE email = $1 AND deleted_at IS NULL)`, email).Scan(&exists)
-	if exists {
-		return nil, ErrEmailTaken
+// SetOrgFirstAdmin promotes an existing user to admin of the given org.
+// Called by super admin when creating an org with an existing user email.
+func (s *Store) SetOrgFirstAdmin(email, orgID string) error {
+	return s.LinkExistingUserToOrg(email, orgID, RoleAdmin)
+}
+
+// FindByEmail returns a user by email (exported for pre-validation).
+func (s *Store) FindByEmail(email string) (*User, error) {
+	u, err := s.findByEmail(email)
+	if err != nil {
+		return nil, ErrNotFound
 	}
-	u := &User{
-		ID:           uuid.NewString(),
-		Name:         name,
-		Email:        email,
-		Role:         role,
-		AccountType:  AccountTypeOrg,
-		OrgID:        orgID,
-		MemberStatus: MemberStatusApproved,
-		Provider:     "local",
-	}
-	_, err := s.db.Exec(
-		`INSERT INTO users (id, name, email, role, provider, account_type, org_id, member_status)
-		 VALUES ($1, $2, $3, $4, 'local', 'org', $5, 'approved')`,
-		u.ID, u.Name, u.Email, string(role), orgID,
-	)
-	return u, err
+	return u, nil
 }
 
 // ── Member management ─────────────────────────────────────────────────────────
 
 func (s *Store) ListOrgMembers(orgID string) ([]OrgMemberDetail, error) {
 	rows, err := s.db.Query(
-		`SELECT u.id, u.name, u.email, u.role, COALESCE(u.member_status,'approved'), u.created_at
-		 FROM users u WHERE u.org_id = $1 AND u.deleted_at IS NULL
-		 UNION
-		 SELECT u.id, u.name, u.email, m.role, 'approved', m.created_at
-		 FROM org_memberships m JOIN users u ON u.id = m.user_id
+		`SELECT u.id, u.name, u.email, m.role, 'approved', m.created_at, u.blocked_at IS NOT NULL, COALESCE(u.avatar_url,'')
+		 FROM org_memberships m
+		 JOIN users u ON u.id = m.user_id
 		 WHERE m.org_id = $1 AND m.status = 'active' AND u.deleted_at IS NULL
-		 ORDER BY created_at ASC`,
+		 ORDER BY m.created_at ASC`,
 		orgID,
 	)
 	if err != nil {
@@ -476,7 +711,7 @@ func (s *Store) ListOrgMembers(orgID string) ([]OrgMemberDetail, error) {
 	for rows.Next() {
 		var m OrgMemberDetail
 		var roleStr, statusStr string
-		if err := rows.Scan(&m.UserID, &m.Name, &m.Email, &roleStr, &statusStr, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.UserID, &m.Name, &m.Email, &roleStr, &statusStr, &m.CreatedAt, &m.Blocked, &m.AvatarURL); err != nil {
 			return nil, err
 		}
 		m.Role = Role(roleStr)
@@ -708,7 +943,7 @@ func (s *Store) DeclineOrgInvite(userID, token string) error {
 // ListMyOrgs returns all orgs the user is an active member of (from org_memberships + primary org).
 func (s *Store) ListMyOrgs(userID string) ([]OrgMembership, error) {
 	rows, err := s.db.Query(`
-		SELECT m.id, m.org_id, o.name, m.user_id, m.role, m.status, m.invited_by, m.created_at
+		SELECT m.id, m.org_id, o.name, COALESCE(o.slug,''), m.user_id, m.role, m.status, m.invited_by, m.created_at
 		FROM org_memberships m
 		JOIN organizations o ON o.id = m.org_id AND o.deleted_at IS NULL
 		WHERE m.user_id=$1 AND m.status='active'
@@ -720,7 +955,7 @@ func (s *Store) ListMyOrgs(userID string) ([]OrgMembership, error) {
 	var result []OrgMembership
 	for rows.Next() {
 		var m OrgMembership
-		if err := rows.Scan(&m.ID, &m.OrgID, &m.OrgName, &m.UserID, &m.Role, &m.Status, &m.InvitedBy, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.OrgID, &m.OrgName, &m.OrgSlug, &m.UserID, &m.Role, &m.Status, &m.InvitedBy, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		result = append(result, m)
@@ -830,17 +1065,19 @@ func (s *Store) GetOrgVisibleServices(userID, orgID string) ([]string, error) {
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 const userSelectCols = `id, name, email, role, provider, google_id,
-	COALESCE(account_type,''), COALESCE(org_id,''), COALESCE(member_status,''), created_at, deleted_at`
+	COALESCE(account_type,''), COALESCE(org_id,''), COALESCE(member_status,''), created_at, deleted_at, blocked_at,
+	COALESCE(phone,''), COALESCE(avatar_url,'')`
 
 func scanUser(row interface {
 	Scan(...any) error
 }) (*User, error) {
 	u := &User{}
 	var accountType, orgID, memberStatus string
-	var deletedAt sql.NullTime
+	var deletedAt, blockedAt sql.NullTime
 	if err := row.Scan(
 		&u.ID, &u.Name, &u.Email, &u.Role, &u.Provider, &u.GoogleID,
-		&accountType, &orgID, &memberStatus, &u.CreatedAt, &deletedAt,
+		&accountType, &orgID, &memberStatus, &u.CreatedAt, &deletedAt, &blockedAt,
+		&u.Phone, &u.AvatarURL,
 	); err != nil {
 		return nil, err
 	}
@@ -849,6 +1086,9 @@ func scanUser(row interface {
 	u.MemberStatus = MemberStatus(memberStatus)
 	if deletedAt.Valid {
 		u.DeletedAt = &deletedAt.Time
+	}
+	if blockedAt.Valid {
+		u.BlockedAt = &blockedAt.Time
 	}
 	return u, nil
 }
@@ -892,10 +1132,73 @@ func (s *Store) findByGoogleID(googleID string) (*User, error) {
 }
 
 func (s *Store) findByID(id string) (*User, error) {
-	row := s.db.QueryRow(`SELECT `+userSelectCols+` FROM users WHERE id = $1`, id)
+	row := s.db.QueryRow(`SELECT `+userSelectCols+` FROM users WHERE id = $1 AND deleted_at IS NULL AND blocked_at IS NULL`, id)
 	u, err := scanUser(row)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
 	}
 	return u, err
+}
+
+// ── Org permissions ────────────────────────────────────────────────────────────
+
+// GetUserPermissions returns all permission strings granted to a user in an org.
+// Returns an empty slice (not an error) if the user has no grants.
+func (s *Store) GetUserPermissions(orgID, userID string) ([]string, error) {
+	rows, err := s.db.Query(
+		`SELECT permission FROM org_permissions WHERE org_id = $1 AND user_id = $2`,
+		orgID, userID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	perms := []string{}
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		perms = append(perms, p)
+	}
+	return perms, rows.Err()
+}
+
+// SetUserPermissions replaces all permissions for a user in an org atomically.
+// It deletes existing rows then inserts the new set in a transaction.
+func (s *Store) SetUserPermissions(orgID, userID, grantedBy string, permissions []string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(
+		`DELETE FROM org_permissions WHERE org_id = $1 AND user_id = $2`,
+		orgID, userID,
+	); err != nil {
+		return err
+	}
+
+	for _, perm := range permissions {
+		if _, err := tx.Exec(
+			`INSERT INTO org_permissions (id, org_id, user_id, permission, granted_by)
+			 VALUES ($1, $2, $3, $4, $5)`,
+			uuid.NewString(), orgID, userID, perm, grantedBy,
+		); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// HasOrgPermission returns true if the user has been granted the given permission in the org.
+func (s *Store) HasOrgPermission(orgID, userID, permission string) bool {
+	var exists bool
+	s.db.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM org_permissions WHERE org_id = $1 AND user_id = $2 AND permission = $3)`,
+		orgID, userID, permission,
+	).Scan(&exists)
+	return exists
 }

@@ -51,12 +51,13 @@ func main() {
 		store, cfg.JWTSecret,
 		cfg.GoogleClientID, cfg.GoogleClientSecret,
 		cfg.AppURL, cfg.SecureCookie,
-		ml,
+		ml, cfg.CookieDomain,
 	)
-	orgHandler := handlers.NewOrgHandler(store, clients, ml, cfg.AppURL)
+	orgHandler := handlers.NewOrgHandler(store, clients, ml, cfg.AppURL, cfg.DeveloperEmail)
 
 	// ── Public routes (no auth required) ─────────────────────────────
 	r.HandleFunc("/api/public/orgs", orgHandler.ListPublicOrgs).Methods(http.MethodGet)
+	r.HandleFunc("/api/public/orgs/by-slug/{slug}", orgHandler.GetOrgBySlug).Methods(http.MethodGet)
 
 	// ── Auth routes (public, strict rate limit) ───────────────────────
 	authRouter := r.PathPrefix("/api/auth").Subrouter()
@@ -83,15 +84,21 @@ func main() {
 	superAdminRouter.HandleFunc("/orgs", orgHandler.CreateOrg).Methods(http.MethodPost)
 	superAdminRouter.HandleFunc("/orgs/{orgId}", orgHandler.DeleteOrg).Methods(http.MethodDelete)
 	superAdminRouter.HandleFunc("/orgs/{orgId}/members", orgHandler.GetOrgMembers).Methods(http.MethodGet)
+	superAdminRouter.HandleFunc("/orgs/{orgId}/members/{userId}", orgHandler.RemoveUserFromOrg).Methods(http.MethodDelete)
 	superAdminRouter.HandleFunc("/orgs/{orgId}/services", orgHandler.ListOrgServices).Methods(http.MethodGet)
 	superAdminRouter.HandleFunc("/users", orgHandler.ListAllUsers).Methods(http.MethodGet)
 	superAdminRouter.HandleFunc("/users", orgHandler.AddUser).Methods(http.MethodPost)
 	superAdminRouter.HandleFunc("/users/{userId}", orgHandler.RemoveUser).Methods(http.MethodDelete)
 	superAdminRouter.HandleFunc("/users/{userId}", orgHandler.UpdateUser).Methods(http.MethodPut)
+	superAdminRouter.HandleFunc("/users/{userId}/block", orgHandler.BlockUser).Methods(http.MethodPost)
+	superAdminRouter.HandleFunc("/users/{userId}/unblock", orgHandler.UnblockUser).Methods(http.MethodPost)
+	superAdminRouter.HandleFunc("/bugs", orgHandler.ListBugReports).Methods(http.MethodGet)
+	superAdminRouter.HandleFunc("/bugs/{reportId}/status", orgHandler.UpdateBugReportStatus).Methods(http.MethodPut)
+	superAdminRouter.HandleFunc("/email-preview", orgHandler.PreviewEmail).Methods(http.MethodGet)
 
 	// ── Org admin: member approval + service visibility ───────────────
 	orgAdminRouter := protected.PathPrefix("/api/org").Subrouter()
-	orgAdminRouter.Use(auth.RequireOrgAdmin())
+	orgAdminRouter.Use(auth.RequireOrgAdmin(store))
 	orgAdminRouter.HandleFunc("/pending", orgHandler.ListPending).Methods(http.MethodGet)
 	orgAdminRouter.HandleFunc("/members", orgHandler.ListMembers).Methods(http.MethodGet)
 	orgAdminRouter.HandleFunc("/members/{userId}/approve", orgHandler.ApproveMember).Methods(http.MethodPost)
@@ -103,15 +110,20 @@ func main() {
 	orgAdminRouter.HandleFunc("/services/{serviceName}/visibility/{userId}", orgHandler.RevokeServiceVisibility).Methods(http.MethodDelete)
 	orgAdminRouter.HandleFunc("/invite", orgHandler.InviteUser).Methods(http.MethodPost)
 	orgAdminRouter.HandleFunc("/invites", orgHandler.ListOrgInvites).Methods(http.MethodGet)
+	orgAdminRouter.HandleFunc("/members/{userId}/role", orgHandler.ChangeOrgMemberRole).Methods(http.MethodPut)
+	orgAdminRouter.HandleFunc("/members/{userId}/permissions", orgHandler.GetMemberPermissions).Methods(http.MethodGet)
+	orgAdminRouter.HandleFunc("/members/{userId}/permissions", orgHandler.SetMemberPermissions).Methods(http.MethodPut)
 
 	// ── User: my orgs & invites ───────────────────────────────────────
 	protected.HandleFunc("/api/me/orgs", orgHandler.ListMyOrgs).Methods(http.MethodGet)
 	protected.HandleFunc("/api/me/invites", orgHandler.ListMyInvites).Methods(http.MethodGet)
 	protected.HandleFunc("/api/me/invites/accept", orgHandler.AcceptInvite).Methods(http.MethodPost)
 	protected.HandleFunc("/api/me/invites/decline", orgHandler.DeclineInvite).Methods(http.MethodPost)
+	protected.HandleFunc("/api/bugs", orgHandler.SubmitBugReport).Methods(http.MethodPost)
 
 	// Org-specific services (any member)
 	protected.HandleFunc("/api/orgs/{orgId}/services", orgHandler.GetOrgServicesForUser).Methods(http.MethodGet)
+	protected.HandleFunc("/api/orgs/{orgId}/my-permissions", orgHandler.GetMyOrgPermissions).Methods(http.MethodGet)
 
 	// ── Service/config routes (approved users only) ───────────────────
 	svcRouter := protected.PathPrefix("").Subrouter()
@@ -141,7 +153,7 @@ func main() {
 	svcRouter.HandleFunc("/ws/subscribe/{serviceName}", handlers.Subscribe(clients, store))
 
 	log.Printf("Starting server on :%s", cfg.Port)
-	if err := http.ListenAndServe(":"+cfg.Port, middleware.CORS(r)); err != nil {
+	if err := http.ListenAndServe(":"+cfg.Port, middleware.CORS(r, cfg.BaseDomain)); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
 }

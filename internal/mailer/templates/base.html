@@ -1,0 +1,50 @@
+{{define "base"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{.Subject}}</title>
+</head>
+<body style="margin:0;padding:0;background:#0f0f17;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f0f17;padding:40px 0;">
+    <tr>
+      <td align="center">
+        <table width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;">
+
+          <!-- Logo -->
+          <tr>
+            <td style="padding:0 0 28px 0;" align="center">
+              <span style="font-size:22px;font-weight:700;background:linear-gradient(135deg,#6366f1,#818cf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:-0.5px;">
+                Konfig
+              </span>
+              <p style="margin:4px 0 0;font-size:12px;color:#555577;letter-spacing:0.5px;text-transform:uppercase;">
+                Configuration Management
+              </p>
+            </td>
+          </tr>
+
+          <!-- Card -->
+          <tr>
+            <td style="background:#16161f;border:1px solid #2a2a3a;border-radius:12px;padding:36px 40px;">
+              {{block "body" .}}{{end}}
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="padding:24px 0 0;text-align:center;">
+              <p style="margin:0;font-size:11px;color:#3a3a55;line-height:1.8;">
+                &copy; {{.Year}} Saptarshi Ghosh &nbsp;&middot;&nbsp; Konfig<br/>
+                You received this email because an action was performed on your account.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+{{end}}

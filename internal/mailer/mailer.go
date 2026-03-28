@@ -11,7 +11,7 @@ import (
 const resendEndpoint = "https://api.resend.com/emails"
 
 // Mailer sends transactional email via Resend.
-// If APIKey is empty it logs OTPs to stdout instead (convenient for local dev).
+// If APIKey is empty it logs to stdout instead (convenient for local dev).
 type Mailer struct {
 	apiKey string
 	from   string
@@ -23,35 +23,53 @@ func New(apiKey, from string) *Mailer {
 
 // SendOTP sends a one-time password email for login.
 func (m *Mailer) SendOTP(to, code, purpose string) error {
-	subject := "Your Konfig verification code"
-	body := fmt.Sprintf(
-		"Hello,\n\nYour Konfig login OTP is:\n\n    %s\n\nThe code expires in 15 minutes.",
-		code,
-	)
-
 	if m.apiKey == "" {
 		log.Printf("[MAILER] OTP for %s (purpose=%s): %s", to, purpose, code)
 		return nil
 	}
-	return m.send(to, subject, body)
+	html, err := RenderOTP(code)
+	if err != nil {
+		return err
+	}
+	return m.send(to, "Your Konfig verification code", html)
 }
 
+// SendInvite sends an org invitation email.
 func (m *Mailer) SendInvite(to, orgName, inviterName, token, appURL string) error {
-	subject := fmt.Sprintf("You've been invited to join %s on Konfig", orgName)
 	acceptURL := appURL + "/invites/" + token
-	body := fmt.Sprintf(
-		"Hello,\n\n%s has invited you to join the organization \"%s\" on Konfig.\n\nClick the link below to accept:\n\n    %s\n\nThis invite expires in 7 days. If you didn't expect this email, you can safely ignore it.",
-		inviterName, orgName, acceptURL,
-	)
-	return m.send(to, subject, body)
+	subject := fmt.Sprintf("You've been invited to join %s on Konfig", orgName)
+	if m.apiKey == "" {
+		log.Printf("[MAILER] Invite for %s to org %s: %s", to, orgName, acceptURL)
+		return nil
+	}
+	html, err := RenderInvite(orgName, inviterName, acceptURL)
+	if err != nil {
+		return err
+	}
+	return m.send(to, subject, html)
 }
 
-func (m *Mailer) send(to, subject, body string) error {
+// SendBugReport notifies the developer of a new bug report.
+func (m *Mailer) SendBugReport(to, issueType, title, description, reporterEmail string) error {
+	subject := fmt.Sprintf("[Konfig] New report: %s", title)
+	if m.apiKey == "" {
+		log.Printf("[MAILER] Bug report to %s | type=%s | reporter=%s | %s", to, issueType, reporterEmail, title)
+		return nil
+	}
+	html, err := RenderBugReport(issueType, title, description, reporterEmail)
+	if err != nil {
+		return err
+	}
+	return m.send(to, subject, html)
+}
+
+// send delivers an HTML email via the Resend API.
+func (m *Mailer) send(to, subject, html string) error {
 	payload := map[string]any{
 		"from":    m.from,
 		"to":      []string{to},
 		"subject": subject,
-		"text":    body,
+		"html":    html,
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {

@@ -21,10 +21,11 @@ type AuthHandler struct {
 	oauthCfg     *oauth2.Config
 	appURL       string
 	secureCookie bool
+	cookieDomain string
 	mailer       *mailer.Mailer
 }
 
-func NewAuthHandler(store *auth.Store, secret, googleClientID, googleClientSecret, appURL string, secureCookie bool, ml *mailer.Mailer) *AuthHandler {
+func NewAuthHandler(store *auth.Store, secret, googleClientID, googleClientSecret, appURL string, secureCookie bool, ml *mailer.Mailer, cookieDomain string) *AuthHandler {
 	oauthCfg := &oauth2.Config{
 		ClientID:     googleClientID,
 		ClientSecret: googleClientSecret,
@@ -38,6 +39,7 @@ func NewAuthHandler(store *auth.Store, secret, googleClientID, googleClientSecre
 		oauthCfg:     oauthCfg,
 		appURL:       appURL,
 		secureCookie: secureCookie,
+		cookieDomain: cookieDomain,
 		mailer:       ml,
 	}
 }
@@ -50,6 +52,8 @@ type userResponse struct {
 	AccountType  auth.AccountType  `json:"account_type,omitempty"`
 	OrgID        string            `json:"org_id,omitempty"`
 	MemberStatus auth.MemberStatus `json:"member_status,omitempty"`
+	Phone        string            `json:"phone,omitempty"`
+	AvatarURL    string            `json:"avatar_url,omitempty"`
 }
 
 func toUserResponse(u *auth.User) userResponse {
@@ -61,6 +65,8 @@ func toUserResponse(u *auth.User) userResponse {
 		AccountType:  u.AccountType,
 		OrgID:        u.OrgID,
 		MemberStatus: u.MemberStatus,
+		Phone:        u.Phone,
+		AvatarURL:    u.AvatarURL,
 	}
 }
 
@@ -73,6 +79,7 @@ func (h *AuthHandler) setSessionCookie(w http.ResponseWriter, user *auth.User) e
 		Name:     auth.CookieName(),
 		Value:    token,
 		Path:     "/",
+		Domain:   h.cookieDomain,
 		HttpOnly: true,
 		Secure:   h.secureCookie,
 		SameSite: http.SameSiteLaxMode,
@@ -169,13 +176,15 @@ func (h *AuthHandler) UpdateMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name string `json:"name"`
+		Name      string `json:"name"`
+		Phone     string `json:"phone"`
+		AvatarURL string `json:"avatar_url"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
 		return
 	}
-	if err := h.store.UpdateOwnCreds(user.ID, req.Name); err != nil {
+	if err := h.store.UpdateOwnCreds(user.ID, req.Name, req.Phone, req.AvatarURL); err != nil {
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
@@ -201,11 +210,12 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 // ── OTP-based flows ───────────────────────────────────────────────────────────
 
 // SendOTP handles POST /api/auth/send-otp
-// Body: {"email":"...", "purpose":"login"}
+// Body: {"email":"...", "purpose":"login", "org_slug":"..."}
 func (h *AuthHandler) SendOTP(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Email   string `json:"email"`
 		Purpose string `json:"purpose"`
+		OrgSlug string `json:"org_slug"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" {
 		writeError(w, http.StatusBadRequest, "email is required")
@@ -214,6 +224,34 @@ func (h *AuthHandler) SendOTP(w http.ResponseWriter, r *http.Request) {
 	if req.Purpose != "login" {
 		writeError(w, http.StatusBadRequest, "purpose must be 'login'")
 		return
+	}
+
+	// On org subdomains: verify the account exists, is not blocked, and belongs to the org.
+	// On the main domain: only reject if explicitly blocked; new users are auto-created by LoginWithOTP.
+	if req.OrgSlug != "" {
+		activeUser, err := h.store.FindActiveByEmail(req.Email)
+		if err != nil {
+			if !errors.Is(err, auth.ErrNotFound) {
+				log.Printf("[SendOTP] FindActiveByEmail error for %s: %v", req.Email, err)
+			}
+			writeError(w, http.StatusForbidden, "account not found or is blocked")
+			return
+		}
+		org, err := h.store.FindOrgBySlug(req.OrgSlug)
+		if err != nil {
+			writeError(w, http.StatusForbidden, "email not registered with this organization")
+			return
+		}
+		if _, err := h.store.GetOrgMembership(activeUser.ID, org.ID); err != nil {
+			writeError(w, http.StatusForbidden, "email not registered with this organization")
+			return
+		}
+	} else {
+		// Main domain: only block explicitly blocked accounts.
+		if blocked, err := h.store.IsBlocked(req.Email); err == nil && blocked {
+			writeError(w, http.StatusForbidden, "account not found or is blocked")
+			return
+		}
 	}
 
 	code, err := h.store.CreateOTP(req.Email, req.Purpose)
@@ -298,9 +336,10 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	var info struct {
-		Sub   string `json:"sub"`
-		Name  string `json:"name"`
-		Email string `json:"email"`
+		Sub     string `json:"sub"`
+		Name    string `json:"name"`
+		Email   string `json:"email"`
+		Picture string `json:"picture"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
 		log.Printf("GoogleCallback: decode userinfo failed: %v", err)
@@ -312,6 +351,9 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 		log.Printf("GoogleCallback: UpsertGoogle failed for %s: %v", info.Email, err)
 		http.Redirect(w, r, h.appURL+"/login?error=oauth_failed", http.StatusTemporaryRedirect)
 		return
+	}
+	if info.Picture != "" {
+		_ = h.store.SetAvatarURLIfEmpty(user.ID, info.Picture)
 	}
 	if err := h.setSessionCookie(w, user); err != nil {
 		log.Printf("GoogleCallback: setSessionCookie failed: %v", err)

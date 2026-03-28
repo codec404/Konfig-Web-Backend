@@ -110,6 +110,12 @@ func ListSchemas(clients *grpcclient.Clients, store *auth.Store) http.HandlerFun
 	return func(w http.ResponseWriter, r *http.Request) {
 		user := auth.UserFromContext(r.Context())
 		ns := resolveNS(r, user, store)
+
+		if !checkPerm(r, user, ns, "schemas.view", store) {
+			writeError(w, http.StatusForbidden, "permission denied")
+			return
+		}
+
 		cleanSvcParam := r.URL.Query().Get("service_name")
 
 		// If a filter is provided, namespace it; otherwise list all and filter below.
@@ -153,6 +159,11 @@ func GetSchema(clients *grpcclient.Clients, store *auth.Store) http.HandlerFunc 
 		vars := mux.Vars(r)
 		schemaID := vars["schemaId"]
 
+		if !checkPerm(r, user, ns, "schemas.view", store) {
+			writeError(w, http.StatusForbidden, "permission denied")
+			return
+		}
+
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
@@ -181,6 +192,12 @@ func RegisterSchema(clients *grpcclient.Clients, store *auth.Store) http.Handler
 	return func(w http.ResponseWriter, r *http.Request) {
 		user := auth.UserFromContext(r.Context())
 		ns := resolveNS(r, user, store)
+
+		if !checkPerm(r, user, ns, "schemas.manage", store) {
+			writeError(w, http.StatusForbidden, "permission denied")
+			return
+		}
+
 		var body struct {
 			ServiceName   string `json:"service_name"`
 			SchemaID      string `json:"schema_id"`

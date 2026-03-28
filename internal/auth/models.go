@@ -6,6 +6,7 @@ type OrgMembership struct {
 	ID        string    `json:"id"`
 	OrgID     string    `json:"org_id"`
 	OrgName   string    `json:"org_name"`
+	OrgSlug   string    `json:"slug,omitempty"`
 	UserID    string    `json:"user_id"`
 	Role      Role      `json:"role"`
 	Status    string    `json:"status"` // "invited" | "active"
@@ -61,8 +62,11 @@ type User struct {
 	MemberStatus MemberStatus // pending/approved/rejected for org users
 	Provider     string       // "local" or "google"
 	GoogleID     string
+	Phone        string
+	AvatarURL    string
 	CreatedAt    time.Time
 	DeletedAt    *time.Time
+	BlockedAt    *time.Time
 }
 
 // Namespace returns the service namespace prefix for this user.
@@ -84,6 +88,7 @@ func (u *User) Namespace() string {
 type Organization struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
+	Slug      string    `json:"slug"`
 	CreatedBy string    `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -95,6 +100,8 @@ type OrgMemberDetail struct {
 	Role         Role         `json:"role"`
 	MemberStatus MemberStatus `json:"member_status"`
 	CreatedAt    time.Time    `json:"joined_at"`
+	Blocked      bool         `json:"blocked"`
+	AvatarURL    string       `json:"avatar_url,omitempty"`
 }
 
 type ServiceVisibility struct {

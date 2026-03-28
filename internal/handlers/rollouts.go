@@ -97,6 +97,12 @@ func StartRollout(clients *grpcclient.Clients, store *auth.Store) http.HandlerFu
 	return func(w http.ResponseWriter, r *http.Request) {
 		user := auth.UserFromContext(r.Context())
 		ns := resolveNS(r, user, store)
+
+		if !checkPerm(r, user, ns, "rollouts.manage", store) {
+			writeError(w, http.StatusForbidden, "permission denied")
+			return
+		}
+
 		var body struct {
 			ConfigID         string `json:"config_id"`
 			Strategy         string `json:"strategy"`
@@ -144,6 +150,10 @@ func GetRolloutStatus(clients *grpcclient.Clients, store *auth.Store) http.Handl
 			writeError(w, http.StatusForbidden, "access denied")
 			return
 		}
+		if !checkPerm(r, user, ns, "rollouts.view", store) {
+			writeError(w, http.StatusForbidden, "permission denied")
+			return
+		}
 
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
@@ -174,6 +184,12 @@ func Rollback(clients *grpcclient.Clients, store *auth.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user := auth.UserFromContext(r.Context())
 		ns := resolveNS(r, user, store)
+
+		if !checkPerm(r, user, ns, "rollouts.manage", store) {
+			writeError(w, http.StatusForbidden, "permission denied")
+			return
+		}
+
 		var body struct {
 			ServiceName string `json:"service_name"`
 			ConfigName  string `json:"config_name"`
@@ -217,6 +233,10 @@ func PromoteRollout(clients *grpcclient.Clients, store *auth.Store) http.Handler
 			writeError(w, http.StatusForbidden, "access denied")
 			return
 		}
+		if !checkPerm(r, user, ns, "rollouts.manage", store) {
+			writeError(w, http.StatusForbidden, "permission denied")
+			return
+		}
 
 		var body struct {
 			NewTargetPercentage int32 `json:"new_target_percentage"`
@@ -251,6 +271,12 @@ func ListRollouts(clients *grpcclient.Clients, store *auth.Store) http.HandlerFu
 	return func(w http.ResponseWriter, r *http.Request) {
 		user := auth.UserFromContext(r.Context())
 		ns := resolveNS(r, user, store)
+
+		if !checkPerm(r, user, ns, "rollouts.view", store) {
+			writeError(w, http.StatusForbidden, "permission denied")
+			return
+		}
+
 		statusFilter := r.URL.Query().Get("status_filter")
 		limit := int32(50)
 		if v := r.URL.Query().Get("limit"); v != "" {
