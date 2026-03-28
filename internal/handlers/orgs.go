@@ -30,6 +30,30 @@ func NewOrgHandler(store *auth.Store, clients *grpcclient.Clients, ml *mailer.Ma
 
 // ── Public ────────────────────────────────────────────────────────────────────
 
+// TLSCheck is called by Caddy's on-demand TLS to decide whether to issue a cert.
+// GET /api/public/tls-check?domain=acme.konfig.org.in
+// Returns 200 if the subdomain maps to a known org, 403 otherwise.
+func TLSCheck(store *auth.Store, baseDomain string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		domain := r.URL.Query().Get("domain")
+		suffix := "." + baseDomain
+		if !strings.HasSuffix(domain, suffix) {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		slug := strings.TrimSuffix(domain, suffix)
+		if slug == "" || strings.Contains(slug, ".") {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if _, err := store.FindOrgBySlug(slug); err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
 // GetOrgBySlug resolves an org slug to org info (public endpoint for subdomain routing).
 // GET /api/public/orgs/by-slug/{slug}
 func (h *OrgHandler) GetOrgBySlug(w http.ResponseWriter, r *http.Request) {

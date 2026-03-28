@@ -73,6 +73,7 @@ func main() {
 	// ── Public routes (no auth required) ─────────────────────────────
 	r.HandleFunc("/api/public/orgs", orgHandler.ListPublicOrgs).Methods(http.MethodGet)
 	r.HandleFunc("/api/public/orgs/by-slug/{slug}", orgHandler.GetOrgBySlug).Methods(http.MethodGet)
+	r.HandleFunc("/api/public/tls-check", handlers.TLSCheck(store, cfg.BaseDomain)).Methods(http.MethodGet)
 
 	// ── Auth routes (public, strict rate limit) ───────────────────────
 	authRouter := r.PathPrefix("/api/auth").Subrouter()
