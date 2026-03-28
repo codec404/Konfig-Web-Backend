@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -12,6 +11,7 @@ import (
 	"github.com/codec404/Konfig/pkg/pb"
 	"github.com/codec404/konfig-web-backend/internal/auth"
 	grpcclient "github.com/codec404/konfig-web-backend/internal/grpc"
+	applogger "github.com/codec404/konfig-web-backend/internal/logger"
 	"github.com/codec404/konfig-web-backend/internal/mailer"
 	"github.com/gorilla/mux"
 )
@@ -130,6 +130,7 @@ func (h *OrgHandler) CreateOrg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	applogger.Info("org created", map[string]any{"org_id": org.ID, "org_name": org.Name, "first_admin_email": req.FirstAdminEmail, "created_by": caller.ID})
 	writeJSON(w, http.StatusCreated, map[string]any{"org": org})
 }
 
@@ -252,6 +253,7 @@ func (h *OrgHandler) DeleteOrg(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	applogger.Info("org deleted", map[string]any{"org_id": orgID})
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
@@ -302,6 +304,7 @@ func (h *OrgHandler) AddUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	applogger.Info("user added to org", map[string]any{"email": req.Email, "org_id": req.OrgID, "role": string(req.Role)})
 	writeJSON(w, http.StatusCreated, map[string]any{"ok": true})
 }
 
@@ -318,6 +321,7 @@ func (h *OrgHandler) RemoveUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
+	applogger.Info("user removed", map[string]any{"user_id": userID, "removed_by": caller.ID})
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
@@ -381,7 +385,8 @@ func (h *OrgHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
 func (h *OrgHandler) ApproveMember(w http.ResponseWriter, r *http.Request) {
 	caller := auth.UserFromContext(r.Context())
 	userID := mux.Vars(r)["userId"]
-	if err := h.store.ApproveMember(callerOrgID(r, caller, h.store), userID); err != nil {
+	orgID := callerOrgID(r, caller, h.store)
+	if err := h.store.ApproveMember(orgID, userID); err != nil {
 		if errors.Is(err, auth.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "pending member not found")
 			return
@@ -389,6 +394,7 @@ func (h *OrgHandler) ApproveMember(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	applogger.Info("org member approved", map[string]any{"user_id": userID, "org_id": orgID, "approved_by": caller.ID})
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
@@ -397,7 +403,8 @@ func (h *OrgHandler) ApproveMember(w http.ResponseWriter, r *http.Request) {
 func (h *OrgHandler) RejectMember(w http.ResponseWriter, r *http.Request) {
 	caller := auth.UserFromContext(r.Context())
 	userID := mux.Vars(r)["userId"]
-	if err := h.store.RejectMember(callerOrgID(r, caller, h.store), userID); err != nil {
+	rejectOrgID := callerOrgID(r, caller, h.store)
+	if err := h.store.RejectMember(rejectOrgID, userID); err != nil {
 		if errors.Is(err, auth.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "pending member not found")
 			return
@@ -405,6 +412,7 @@ func (h *OrgHandler) RejectMember(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	applogger.Info("org member rejected", map[string]any{"user_id": userID, "org_id": rejectOrgID, "rejected_by": caller.ID})
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
@@ -413,7 +421,8 @@ func (h *OrgHandler) RejectMember(w http.ResponseWriter, r *http.Request) {
 func (h *OrgHandler) RemoveOrgMember(w http.ResponseWriter, r *http.Request) {
 	caller := auth.UserFromContext(r.Context())
 	userID := mux.Vars(r)["userId"]
-	if err := h.store.RemoveFromOrg(caller.Role, callerOrgID(r, caller, h.store), userID); err != nil {
+	removeOrgID := callerOrgID(r, caller, h.store)
+	if err := h.store.RemoveFromOrg(caller.Role, removeOrgID, userID); err != nil {
 		if errors.Is(err, auth.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "user not found")
 			return
@@ -421,6 +430,7 @@ func (h *OrgHandler) RemoveOrgMember(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
+	applogger.Info("org member removed", map[string]any{"user_id": userID, "org_id": removeOrgID, "removed_by": caller.ID})
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
@@ -574,6 +584,7 @@ func (h *OrgHandler) AcceptInvite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	applogger.Info("org invite accepted", map[string]any{"user_id": user.ID, "email": user.Email})
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
@@ -634,7 +645,7 @@ func (h *OrgHandler) InviteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("[InviteUser] unexpected error for org %s, email %s: %v", orgID, req.Email, err)
+		applogger.Error("invite user: unexpected error", map[string]any{"org_id": orgID, "email": req.Email, "err": err.Error()})
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -645,8 +656,9 @@ func (h *OrgHandler) InviteUser(w http.ResponseWriter, r *http.Request) {
 		orgName = org.Name
 	}
 	if err := h.mailer.SendInvite(req.Email, orgName, caller.Name, token, h.appURL); err != nil {
-		log.Printf("[InviteUser] failed to send invite email to %s: %v", req.Email, err)
+		applogger.Error("invite user: email delivery failed", map[string]any{"email": req.Email, "org_id": orgID, "err": err.Error()})
 	}
+	applogger.Info("user invited to org", map[string]any{"email": req.Email, "org_id": orgID, "role": string(req.Role), "invited_by": caller.ID})
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
@@ -724,6 +736,7 @@ func (h *OrgHandler) BlockUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	applogger.Info("user blocked", map[string]any{"user_id": userID})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -735,6 +748,7 @@ func (h *OrgHandler) UnblockUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	applogger.Info("user unblocked", map[string]any{"user_id": userID})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -760,6 +774,7 @@ func (h *OrgHandler) ChangeOrgMemberRole(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	applogger.Info("org member role changed", map[string]any{"user_id": userID, "org_id": orgID, "new_role": string(req.Role), "changed_by": caller.ID})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -948,6 +963,7 @@ func (h *OrgHandler) SubmitBugReport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	applogger.Info("bug report submitted", map[string]any{"user_id": user.ID, "issue_type": req.IssueType, "title": req.Title})
 	if h.developerEmail != "" {
 		go h.mailer.SendBugReport(h.developerEmail, req.IssueType, req.Title, req.Description, user.Email)
 	}

@@ -3,12 +3,14 @@ package main
 import (
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/codec404/konfig-web-backend/internal/auth"
 	"github.com/codec404/konfig-web-backend/internal/config"
 	"github.com/codec404/konfig-web-backend/internal/db"
 	grpcclient "github.com/codec404/konfig-web-backend/internal/grpc"
 	"github.com/codec404/konfig-web-backend/internal/handlers"
+	applogger "github.com/codec404/konfig-web-backend/internal/logger"
 	"github.com/codec404/konfig-web-backend/internal/mailer"
 	"github.com/codec404/konfig-web-backend/internal/middleware"
 	"github.com/gorilla/mux"
@@ -32,6 +34,18 @@ func main() {
 		log.Printf("warn: could not seed super admin: %v", err)
 	}
 
+	// ── Logger + prune worker ─────────────────────────────────────────
+	applogger.Init(store)
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := store.PruneLogs(); err != nil {
+				log.Printf("warn: log prune failed: %v", err)
+			}
+		}
+	}()
+
 	// ── gRPC clients ──────────────────────────────────────────────────
 	clients, err := grpcclient.NewClients(cfg)
 	if err != nil {
@@ -41,6 +55,7 @@ func main() {
 
 	// ── Router ────────────────────────────────────────────────────────
 	r := mux.NewRouter()
+	r.Use(middleware.RequestLogger(store))
 
 	authLimiter := middleware.NewRateLimiter(10, 5)
 	apiLimiter := middleware.NewRateLimiter(300, 50)
@@ -95,6 +110,9 @@ func main() {
 	superAdminRouter.HandleFunc("/bugs", orgHandler.ListBugReports).Methods(http.MethodGet)
 	superAdminRouter.HandleFunc("/bugs/{reportId}/status", orgHandler.UpdateBugReportStatus).Methods(http.MethodPut)
 	superAdminRouter.HandleFunc("/email-preview", orgHandler.PreviewEmail).Methods(http.MethodGet)
+	superAdminRouter.HandleFunc("/logs", handlers.ListLogs(store)).Methods(http.MethodGet)
+	superAdminRouter.HandleFunc("/logs/settings", handlers.GetLogSettings()).Methods(http.MethodGet)
+	superAdminRouter.HandleFunc("/logs/settings", handlers.SetLogSettings()).Methods(http.MethodPut)
 
 	// ── Org admin: member approval + service visibility ───────────────
 	orgAdminRouter := protected.PathPrefix("/api/org").Subrouter()
@@ -120,6 +138,7 @@ func main() {
 	protected.HandleFunc("/api/me/invites/accept", orgHandler.AcceptInvite).Methods(http.MethodPost)
 	protected.HandleFunc("/api/me/invites/decline", orgHandler.DeclineInvite).Methods(http.MethodPost)
 	protected.HandleFunc("/api/bugs", orgHandler.SubmitBugReport).Methods(http.MethodPost)
+	protected.HandleFunc("/api/logs", handlers.IngestFrontendLogs(store)).Methods(http.MethodPost)
 
 	// Org-specific services (any member)
 	protected.HandleFunc("/api/orgs/{orgId}/services", orgHandler.GetOrgServicesForUser).Methods(http.MethodGet)

@@ -3,6 +3,7 @@ package auth
 import (
 	"crypto/rand"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -183,7 +184,132 @@ func (s *Store) Migrate() error {
 		return err
 	}
 
+	// Application logs (backend + frontend, 3-day rolling window)
+	if _, err := s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS app_logs (
+			id         BIGSERIAL    PRIMARY KEY,
+			source     VARCHAR(10)  NOT NULL,
+			level      VARCHAR(10)  NOT NULL,
+			message    TEXT         NOT NULL,
+			context    JSONB,
+			created_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+		)
+	`); err != nil {
+		return err
+	}
+	for _, idx := range []string{
+		`CREATE INDEX IF NOT EXISTS app_logs_created_at_idx ON app_logs (created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS app_logs_level_idx      ON app_logs (level)`,
+		`CREATE INDEX IF NOT EXISTS app_logs_source_idx     ON app_logs (source)`,
+	} {
+		if _, err := s.db.Exec(idx); err != nil {
+			return err
+		}
+	}
+
 	return nil
+}
+
+// ── App logs ──────────────────────────────────────────────────────────────────
+
+type AppLog struct {
+	ID        int64          `json:"id"`
+	Source    string         `json:"source"`
+	Level     string         `json:"level"`
+	Message   string         `json:"message"`
+	Context   map[string]any `json:"context,omitempty"`
+	CreatedAt time.Time      `json:"created_at"`
+}
+
+func (s *Store) CreateLog(source, level, message string, ctx map[string]any) error {
+	var ctxJSON []byte
+	if ctx != nil {
+		ctxJSON, _ = json.Marshal(ctx)
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO app_logs (source, level, message, context) VALUES ($1, $2, $3, $4)`,
+		source, level, message, ctxJSON,
+	)
+	return err
+}
+
+type LogFilter struct {
+	Source string
+	Level  string
+	From   time.Time
+	To     time.Time
+	Limit  int
+	Offset int
+}
+
+func (s *Store) ListLogs(f LogFilter) ([]AppLog, int, error) {
+	args := []any{}
+	conds := []string{}
+	i := 1
+
+	if f.Source != "" && f.Source != "all" {
+		conds = append(conds, fmt.Sprintf("source = $%d", i))
+		args = append(args, f.Source)
+		i++
+	}
+	if f.Level != "" && f.Level != "all" {
+		conds = append(conds, fmt.Sprintf("level = $%d", i))
+		args = append(args, f.Level)
+		i++
+	}
+	if !f.From.IsZero() {
+		conds = append(conds, fmt.Sprintf("created_at >= $%d", i))
+		args = append(args, f.From)
+		i++
+	}
+	if !f.To.IsZero() {
+		conds = append(conds, fmt.Sprintf("created_at <= $%d", i))
+		args = append(args, f.To)
+		i++
+	}
+
+	where := ""
+	if len(conds) > 0 {
+		where = "WHERE " + strings.Join(conds, " AND ")
+	}
+
+	var total int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM app_logs `+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	if f.Limit <= 0 {
+		f.Limit = 100
+	}
+	args = append(args, f.Limit, f.Offset)
+	rows, err := s.db.Query(
+		`SELECT id, source, level, message, context, created_at FROM app_logs `+
+			where+fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, i, i+1),
+		args...,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var logs []AppLog
+	for rows.Next() {
+		var l AppLog
+		var ctxRaw []byte
+		if err := rows.Scan(&l.ID, &l.Source, &l.Level, &l.Message, &ctxRaw, &l.CreatedAt); err != nil {
+			return nil, 0, err
+		}
+		if len(ctxRaw) > 0 {
+			_ = json.Unmarshal(ctxRaw, &l.Context)
+		}
+		logs = append(logs, l)
+	}
+	return logs, total, rows.Err()
+}
+
+func (s *Store) PruneLogs() error {
+	_, err := s.db.Exec(`DELETE FROM app_logs WHERE created_at < NOW() - INTERVAL '3 days'`)
+	return err
 }
 
 // ── Bug reports ───────────────────────────────────────────────────────────────

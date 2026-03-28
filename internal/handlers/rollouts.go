@@ -11,6 +11,7 @@ import (
 	"github.com/codec404/Konfig/pkg/pb"
 	"github.com/codec404/konfig-web-backend/internal/auth"
 	grpcclient "github.com/codec404/konfig-web-backend/internal/grpc"
+	applogger "github.com/codec404/konfig-web-backend/internal/logger"
 	"github.com/gorilla/mux"
 )
 
@@ -126,10 +127,14 @@ func StartRollout(clients *grpcclient.Clients, store *auth.Store) http.HandlerFu
 			TargetPercentage: body.TargetPercentage,
 		})
 		if err != nil {
+			applogger.Error("start rollout: gRPC failed", map[string]any{"config_id": body.ConfigID, "err": err.Error()})
 			writeError(w, http.StatusBadGateway, err.Error())
 			return
 		}
-
+		applogger.Info("rollout started", map[string]any{
+			"config_id": body.ConfigID, "strategy": body.Strategy,
+			"target_pct": body.TargetPercentage, "user_id": user.ID,
+		})
 		writeJSON(w, http.StatusOK, map[string]any{
 			"success":    resp.GetSuccess(),
 			"message":    resp.GetMessage(),
@@ -209,10 +214,14 @@ func Rollback(clients *grpcclient.Clients, store *auth.Store) http.HandlerFunc {
 			TargetVersion: body.ToVersion,
 		})
 		if err != nil {
+			applogger.Error("rollback: gRPC failed", map[string]any{"service": body.ServiceName, "version": body.ToVersion, "err": err.Error()})
 			writeError(w, http.StatusBadGateway, err.Error())
 			return
 		}
-
+		applogger.Info("rollback executed", map[string]any{
+			"service": body.ServiceName, "config": body.ConfigName,
+			"to_version": body.ToVersion, "user_id": user.ID,
+		})
 		writeJSON(w, http.StatusOK, map[string]any{
 			"success":   resp.GetSuccess(),
 			"message":   resp.GetMessage(),
@@ -254,10 +263,13 @@ func PromoteRollout(clients *grpcclient.Clients, store *auth.Store) http.Handler
 			NewTargetPercentage: body.NewTargetPercentage,
 		})
 		if err != nil {
+			applogger.Error("promote rollout: gRPC failed", map[string]any{"config_id": configID, "err": err.Error()})
 			writeError(w, http.StatusBadGateway, err.Error())
 			return
 		}
-
+		applogger.Info("rollout promoted", map[string]any{
+			"config_id": configID, "new_target_pct": body.NewTargetPercentage, "user_id": user.ID,
+		})
 		writeJSON(w, http.StatusOK, map[string]any{
 			"success":       resp.GetSuccess(),
 			"message":       resp.GetMessage(),

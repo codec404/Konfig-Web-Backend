@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/codec404/konfig-web-backend/internal/auth"
+	applogger "github.com/codec404/konfig-web-backend/internal/logger"
 	"github.com/codec404/konfig-web-backend/internal/mailer"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -147,6 +147,7 @@ func (h *AuthHandler) Signup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		applogger.Error("signup: create user failed", map[string]any{"email": req.Email, "err": err.Error()})
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
@@ -154,6 +155,7 @@ func (h *AuthHandler) Signup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
+	applogger.Info("user registered", map[string]any{"user_id": user.ID, "email": user.Email, "account_type": string(req.AccountType)})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]any{"user": toUserResponse(user)})
@@ -232,7 +234,9 @@ func (h *AuthHandler) SendOTP(w http.ResponseWriter, r *http.Request) {
 		activeUser, err := h.store.FindActiveByEmail(req.Email)
 		if err != nil {
 			if !errors.Is(err, auth.ErrNotFound) {
-				log.Printf("[SendOTP] FindActiveByEmail error for %s: %v", req.Email, err)
+				applogger.Error("send-otp: user lookup failed", map[string]any{"email": req.Email, "err": err.Error()})
+			} else {
+				applogger.Warn("send-otp: account not found on org subdomain", map[string]any{"email": req.Email, "org_slug": req.OrgSlug})
 			}
 			writeError(w, http.StatusForbidden, "account not found or is blocked")
 			return
@@ -260,10 +264,11 @@ func (h *AuthHandler) SendOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.mailer.SendOTP(req.Email, code, req.Purpose); err != nil {
-		log.Printf("[SendOTP] failed to send email to %s: %v", req.Email, err)
+		applogger.Error("send-otp: email delivery failed", map[string]any{"email": req.Email, "err": err.Error()})
 		writeError(w, http.StatusInternalServerError, "failed to send OTP email")
 		return
 	}
+	applogger.Debug("OTP sent", map[string]any{"email": req.Email, "purpose": req.Purpose})
 	writeJSON(w, http.StatusOK, map[string]any{"sent": true})
 }
 
@@ -280,6 +285,7 @@ func (h *AuthHandler) LoginWithOTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.store.VerifyAndConsumeOTP(req.Email, req.Code, "login"); err != nil {
+		applogger.Warn("OTP login failed: invalid or expired code", map[string]any{"email": req.Email})
 		writeError(w, http.StatusUnauthorized, "invalid or expired OTP")
 		return
 	}
@@ -295,14 +301,17 @@ func (h *AuthHandler) LoginWithOTP(w http.ResponseWriter, r *http.Request) {
 		var createErr error
 		user, createErr = h.store.CreateLocal(name, req.Email, auth.AccountTypeIndividual, "", "")
 		if createErr != nil {
+			applogger.Error("OTP login: auto-register failed", map[string]any{"email": req.Email, "err": createErr.Error()})
 			writeError(w, http.StatusInternalServerError, "internal error")
 			return
 		}
+		applogger.Info("user auto-registered via OTP", map[string]any{"user_id": user.ID, "email": user.Email})
 	}
 	if err := h.setSessionCookie(w, user); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	applogger.Info("user login", map[string]any{"user_id": user.ID, "email": user.Email})
 	writeJSON(w, http.StatusOK, map[string]any{"user": toUserResponse(user)})
 }
 
@@ -316,20 +325,20 @@ func (h *AuthHandler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("code")
 	if code == "" {
-		log.Printf("GoogleCallback: missing code parameter")
+		applogger.Warn("google oauth: missing code parameter", nil)
 		http.Redirect(w, r, h.appURL+"/login?error=oauth_failed", http.StatusTemporaryRedirect)
 		return
 	}
 	token, err := h.oauthCfg.Exchange(context.Background(), code)
 	if err != nil {
-		log.Printf("GoogleCallback: token exchange failed: %v", err)
+		applogger.Error("google oauth: token exchange failed", map[string]any{"err": err.Error()})
 		http.Redirect(w, r, h.appURL+"/login?error=oauth_failed", http.StatusTemporaryRedirect)
 		return
 	}
 	client := h.oauthCfg.Client(context.Background(), token)
 	resp, err := client.Get("https://www.googleapis.com/oauth2/v3/userinfo")
 	if err != nil || resp.StatusCode != http.StatusOK {
-		log.Printf("GoogleCallback: userinfo fetch failed: err=%v status=%v", err, resp.StatusCode)
+		applogger.Error("google oauth: userinfo fetch failed", map[string]any{"err": err, "status": resp.StatusCode})
 		http.Redirect(w, r, h.appURL+"/login?error=oauth_failed", http.StatusTemporaryRedirect)
 		return
 	}
@@ -342,13 +351,13 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 		Picture string `json:"picture"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
-		log.Printf("GoogleCallback: decode userinfo failed: %v", err)
+		applogger.Error("google oauth: decode userinfo failed", map[string]any{"err": err.Error()})
 		http.Redirect(w, r, h.appURL+"/login?error=oauth_failed", http.StatusTemporaryRedirect)
 		return
 	}
 	user, err := h.store.UpsertGoogle(info.Sub, info.Name, info.Email)
 	if err != nil {
-		log.Printf("GoogleCallback: UpsertGoogle failed for %s: %v", info.Email, err)
+		applogger.Error("google oauth: upsert user failed", map[string]any{"email": info.Email, "err": err.Error()})
 		http.Redirect(w, r, h.appURL+"/login?error=oauth_failed", http.StatusTemporaryRedirect)
 		return
 	}
@@ -356,10 +365,10 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 		_ = h.store.SetAvatarURLIfEmpty(user.ID, info.Picture)
 	}
 	if err := h.setSessionCookie(w, user); err != nil {
-		log.Printf("GoogleCallback: setSessionCookie failed: %v", err)
+		applogger.Error("google oauth: set session cookie failed", map[string]any{"user_id": user.ID, "err": err.Error()})
 		http.Redirect(w, r, h.appURL+"/login?error=oauth_failed", http.StatusTemporaryRedirect)
 		return
 	}
-	log.Printf("GoogleCallback: success for %s, redirecting to %s/", info.Email, h.appURL)
+	applogger.Info("user login via google", map[string]any{"user_id": user.ID, "email": user.Email})
 	http.Redirect(w, r, h.appURL+"/", http.StatusTemporaryRedirect)
 }
