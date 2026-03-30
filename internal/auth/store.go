@@ -18,6 +18,7 @@ var ErrEmailTaken = errors.New("email already registered")
 var ErrNotFound = errors.New("user not found")
 var ErrEmailConflict = errors.New("email already in use by a different account type")
 var ErrInvalidOTP = errors.New("invalid or expired OTP")
+var ErrTOTPInvalid = errors.New("invalid TOTP code")
 
 type Store struct {
 	db *sql.DB
@@ -48,13 +49,16 @@ func (s *Store) Migrate() error {
 
 	// New columns added/removed idempotently
 	for _, stmt := range []string{
-		`ALTER TABLE users ADD COLUMN IF NOT EXISTS account_type   TEXT`,
-		`ALTER TABLE users ADD COLUMN IF NOT EXISTS org_id         TEXT`,
-		`ALTER TABLE users ADD COLUMN IF NOT EXISTS member_status  TEXT`,
-		`ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at     TIMESTAMPTZ`,
-		`ALTER TABLE users ADD COLUMN IF NOT EXISTS blocked_at     TIMESTAMPTZ`,
-		`ALTER TABLE users ADD COLUMN IF NOT EXISTS phone          TEXT`,
-		`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url     TEXT`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS account_type          TEXT`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS org_id                TEXT`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS member_status         TEXT`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at            TIMESTAMPTZ`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS blocked_at            TIMESTAMPTZ`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS phone                 TEXT`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url            TEXT`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_secret           TEXT`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_pending_secret   TEXT`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_enabled          BOOLEAN NOT NULL DEFAULT FALSE`,
 		`ALTER TABLE users DROP COLUMN IF EXISTS password_hash`,
 	} {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -1202,6 +1206,50 @@ func (s *Store) GetOrgVisibleServices(userID, orgID string) ([]string, error) {
 		return nil, nil // nil = all services (caller handles this)
 	}
 	return s.GetVisibleServices(orgID, userID)
+}
+
+// ── TOTP ──────────────────────────────────────────────────────────────────────
+
+// TOTPStatus holds the TOTP enrollment state for a user.
+type TOTPStatus struct {
+	Enabled       bool
+	Secret        string // empty if not enrolled
+	PendingSecret string // non-empty during first-time setup
+}
+
+func (s *Store) GetTOTPStatus(userID string) (TOTPStatus, error) {
+	var enabled bool
+	var secret, pending sql.NullString
+	err := s.db.QueryRow(
+		`SELECT COALESCE(totp_enabled, FALSE), totp_secret, totp_pending_secret FROM users WHERE id = $1`,
+		userID,
+	).Scan(&enabled, &secret, &pending)
+	if err != nil {
+		return TOTPStatus{}, err
+	}
+	return TOTPStatus{
+		Enabled:       enabled,
+		Secret:        secret.String,
+		PendingSecret: pending.String,
+	}, nil
+}
+
+// SetTOTPPendingSecret stores a not-yet-confirmed TOTP secret for a user.
+func (s *Store) SetTOTPPendingSecret(userID, secret string) error {
+	_, err := s.db.Exec(
+		`UPDATE users SET totp_pending_secret = $1 WHERE id = $2`,
+		secret, userID,
+	)
+	return err
+}
+
+// ActivateTOTP moves the pending secret to the active secret and sets totp_enabled.
+func (s *Store) ActivateTOTP(userID, secret string) error {
+	_, err := s.db.Exec(
+		`UPDATE users SET totp_secret = $1, totp_pending_secret = NULL, totp_enabled = TRUE WHERE id = $2`,
+		secret, userID,
+	)
+	return err
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

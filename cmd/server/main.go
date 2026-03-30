@@ -90,6 +90,8 @@ func main() {
 	authRouter.HandleFunc("/google/callback", authHandler.GoogleCallback).Methods(http.MethodGet)
 	authRouter.HandleFunc("/send-otp", authHandler.SendOTP).Methods(http.MethodPost)
 	authRouter.HandleFunc("/login-otp", authHandler.LoginWithOTP).Methods(http.MethodPost)
+	authRouter.HandleFunc("/totp-init", authHandler.TOTPInit).Methods(http.MethodPost)
+	authRouter.HandleFunc("/totp-login", authHandler.TOTPLogin).Methods(http.MethodPost)
 
 	// ── Protected base subrouter (session required) ───────────────────
 	protected := r.PathPrefix("").Subrouter()
