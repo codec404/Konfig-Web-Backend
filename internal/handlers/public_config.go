@@ -60,12 +60,13 @@ func GetLatestConfig(clients *grpcclient.Clients, store *auth.Store) http.Handle
 			return
 		}
 
-		// Find the active version.
+		// Find the highest-version active config (list order may be ASC or unspecified).
 		var activeID string
+		var activeVersion int64
 		for _, m := range listResp.GetConfigs() {
-			if m.GetIsActive() {
+			if m.GetIsActive() && m.GetVersion() > activeVersion {
 				activeID = m.GetConfigId()
-				break
+				activeVersion = m.GetVersion()
 			}
 		}
 		if activeID == "" {
