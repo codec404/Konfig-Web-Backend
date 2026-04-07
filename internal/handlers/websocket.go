@@ -110,6 +110,107 @@ func Subscribe(clients *grpcclient.Clients, store *auth.Store, baseDomain string
 	}
 }
 
+// SDKSubscribe handles WS /ws/sdk/subscribe/:serviceName
+// Auth: Bearer service token (ServiceTokenMiddleware must wrap this handler).
+// Unlike Subscribe, origin checking is skipped — SDK clients (Node, Go, etc.)
+// do not send Origin headers, and security is enforced by the token itself.
+func SDKSubscribe(clients *grpcclient.Clients) http.HandlerFunc {
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true },
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := auth.ServiceTokenFromContext(r.Context())
+		if token == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		vars := mux.Vars(r)
+		cleanSvcName := vars["serviceName"]
+		if !validName.MatchString(cleanSvcName) {
+			writeError(w, http.StatusBadRequest, "invalid service name")
+			return
+		}
+
+		// Enforce token binding — token must have been issued for this service.
+		if token.ServiceName != cleanSvcName {
+			writeError(w, http.StatusForbidden, "token not valid for this service")
+			return
+		}
+
+		internalSvcName := applyNS(token.Namespace, cleanSvcName)
+
+		instanceID := r.URL.Query().Get("instance_id")
+		if instanceID == "" {
+			instanceID = "sdk-client"
+		}
+
+		wsConn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Printf("sdk websocket upgrade error: %v", err)
+			return
+		}
+		defer wsConn.Close()
+
+		streamCtx, streamCancel := context.WithCancel(context.Background())
+		defer streamCancel()
+
+		stream, err := clients.Dist.Subscribe(streamCtx)
+		if err != nil {
+			log.Printf("sdk grpc Subscribe error: %v", err)
+			wsConn.WriteJSON(map[string]string{"error": "failed to open stream"})
+			return
+		}
+
+		if err := stream.Send(&pb.SubscribeRequest{
+			ServiceName:    internalSvcName,
+			InstanceId:     instanceID,
+			CurrentVersion: 0,
+		}); err != nil {
+			log.Printf("sdk grpc stream Send error: %v", err)
+			wsConn.WriteJSON(map[string]string{"error": "subscription failed"})
+			return
+		}
+
+		done := make(chan struct{})
+
+		go func() {
+			defer close(done)
+			for {
+				update, err := stream.Recv()
+				if err != nil {
+					log.Printf("sdk grpc stream Recv error: %v", err)
+					return
+				}
+
+				payload, err := marshalConfigUpdate(update, token.Namespace)
+				if err != nil {
+					log.Printf("sdk marshal ConfigUpdate error: %v", err)
+					continue
+				}
+
+				if err := wsConn.WriteMessage(websocket.TextMessage, payload); err != nil {
+					log.Printf("sdk websocket write error: %v", err)
+					return
+				}
+			}
+		}()
+
+		go func() {
+			for {
+				_, _, err := wsConn.ReadMessage()
+				if err != nil {
+					log.Printf("sdk websocket read error: %v", err)
+					streamCancel()
+					return
+				}
+			}
+		}()
+
+		<-done
+	}
+}
+
 // marshalConfigUpdate converts a ConfigUpdate proto to JSON, stripping the namespace prefix from service_name.
 func marshalConfigUpdate(u *pb.ConfigUpdate, ns string) ([]byte, error) {
 	type configDataJSON struct {

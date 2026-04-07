@@ -82,6 +82,20 @@ func main() {
 	r.HandleFunc("/api/public/orgs/by-slug/{slug}", orgHandler.GetOrgBySlug).Methods(http.MethodGet)
 	r.HandleFunc("/api/public/tls-check", handlers.TLSCheck(store, cfg.BaseDomain)).Methods(http.MethodGet)
 
+	// ── SDK routes (service token auth, no user session required) ────────
+	sdkRouter := r.PathPrefix("/api/public").Subrouter()
+	sdkRouter.Use(apiLimiter.Middleware)
+	sdkRouter.Use(auth.ServiceTokenMiddleware(store))
+	sdkRouter.HandleFunc("/services/{serviceName}/configs/{configName}/latest",
+		handlers.GetLatestConfig(clients, store)).Methods(http.MethodGet)
+
+	// SDK WebSocket (token-authed, no origin check)
+	r.Handle("/ws/sdk/subscribe/{serviceName}",
+		auth.ServiceTokenMiddleware(store)(
+			http.HandlerFunc(handlers.SDKSubscribe(clients)),
+		),
+	)
+
 	// ── Auth routes (public, strict rate limit) ───────────────────────
 	authRouter := r.PathPrefix("/api/auth").Subrouter()
 	authRouter.Use(authLimiter.Middleware)
@@ -178,6 +192,11 @@ func main() {
 
 	svcRouter.Handle("/api/stats", handlers.GetStats(clients, store)).Methods(http.MethodGet, http.MethodOptions)
 	svcRouter.Handle("/api/audit-log", handlers.GetAuditLog(clients, store)).Methods(http.MethodGet, http.MethodOptions)
+
+	// ── Service tokens (SDK credentials) ─────────────────────────────────
+	svcRouter.HandleFunc("/api/services/{serviceName}/tokens", handlers.GenerateServiceToken(store)).Methods(http.MethodPost)
+	svcRouter.HandleFunc("/api/services/{serviceName}/tokens", handlers.ListServiceTokens(store)).Methods(http.MethodGet)
+	svcRouter.HandleFunc("/api/services/{serviceName}/tokens/{tokenId}", handlers.RevokeServiceToken(store)).Methods(http.MethodDelete)
 
 	svcRouter.HandleFunc("/ws/subscribe/{serviceName}", handlers.Subscribe(clients, store, cfg.BaseDomain))
 

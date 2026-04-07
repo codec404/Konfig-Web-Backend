@@ -216,6 +216,32 @@ func (s *Store) Migrate() error {
 		}
 	}
 
+	// Service tokens (SDK / external service credentials)
+	if _, err := s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS service_tokens (
+			id           TEXT PRIMARY KEY,
+			service_name TEXT        NOT NULL,
+			namespace    TEXT        NOT NULL DEFAULT '',
+			token_hash   TEXT        NOT NULL UNIQUE,
+			prefix       TEXT        NOT NULL,
+			label        TEXT        NOT NULL DEFAULT '',
+			created_by   TEXT        NOT NULL,
+			created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			last_used_at TIMESTAMPTZ,
+			revoked      BOOLEAN     NOT NULL DEFAULT FALSE
+		)
+	`); err != nil {
+		return err
+	}
+	for _, idx := range []string{
+		`CREATE INDEX IF NOT EXISTS service_tokens_service_name_idx ON service_tokens (service_name)`,
+		`CREATE INDEX IF NOT EXISTS service_tokens_token_hash_idx   ON service_tokens (token_hash)`,
+	} {
+		if _, err := s.db.Exec(idx); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -1391,4 +1417,111 @@ func (s *Store) HasOrgPermission(orgID, userID, permission string) bool {
 		orgID, userID, permission,
 	).Scan(&exists)
 	return exists
+}
+
+// ── Service tokens ────────────────────────────────────────────────────────────
+
+// ServiceToken is the DB record for a service SDK token.
+// The actual token value is never stored — only a SHA-256 hash.
+type ServiceToken struct {
+	ID          string     `json:"id"`
+	ServiceName string     `json:"service_name"`
+	Namespace   string     `json:"namespace"`
+	Prefix      string     `json:"prefix"`
+	Label       string     `json:"label"`
+	CreatedBy   string     `json:"created_by"`
+	CreatedAt   time.Time  `json:"created_at"`
+	LastUsedAt  *time.Time `json:"last_used_at,omitempty"`
+	Revoked     bool       `json:"revoked"`
+}
+
+// CreateServiceToken inserts a new token record.
+// tokenHash is SHA-256(rawToken), prefix is the first 12 chars of rawToken for display.
+func (s *Store) CreateServiceToken(serviceName, namespace, tokenHash, prefix, label, createdBy string) (*ServiceToken, error) {
+	id := uuid.NewString()
+	_, err := s.db.Exec(
+		`INSERT INTO service_tokens (id, service_name, namespace, token_hash, prefix, label, created_by)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		id, serviceName, namespace, tokenHash, prefix, label, createdBy,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return s.GetServiceToken(id)
+}
+
+// GetServiceToken fetches a single token record by its ID.
+func (s *Store) GetServiceToken(id string) (*ServiceToken, error) {
+	var t ServiceToken
+	err := s.db.QueryRow(
+		`SELECT id, service_name, namespace, prefix, label, created_by, created_at, last_used_at, revoked
+		 FROM service_tokens WHERE id = $1`,
+		id,
+	).Scan(&t.ID, &t.ServiceName, &t.Namespace, &t.Prefix, &t.Label, &t.CreatedBy, &t.CreatedAt, &t.LastUsedAt, &t.Revoked)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	return &t, err
+}
+
+// ListServiceTokens returns all non-revoked tokens for a service+namespace pair.
+func (s *Store) ListServiceTokens(serviceName, namespace string) ([]ServiceToken, error) {
+	rows, err := s.db.Query(
+		`SELECT id, service_name, namespace, prefix, label, created_by, created_at, last_used_at, revoked
+		 FROM service_tokens
+		 WHERE service_name = $1 AND namespace = $2 AND revoked = FALSE
+		 ORDER BY created_at DESC`,
+		serviceName, namespace,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tokens []ServiceToken
+	for rows.Next() {
+		var t ServiceToken
+		if err := rows.Scan(&t.ID, &t.ServiceName, &t.Namespace, &t.Prefix, &t.Label, &t.CreatedBy, &t.CreatedAt, &t.LastUsedAt, &t.Revoked); err != nil {
+			return nil, err
+		}
+		tokens = append(tokens, t)
+	}
+	return tokens, rows.Err()
+}
+
+// RevokeServiceToken marks a token as revoked. Returns ErrNotFound if it doesn't exist.
+func (s *Store) RevokeServiceToken(id, namespace string) error {
+	res, err := s.db.Exec(
+		`UPDATE service_tokens SET revoked = TRUE WHERE id = $1 AND namespace = $2`,
+		id, namespace,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ValidateServiceToken looks up a token by its SHA-256 hash, confirms it is active,
+// updates last_used_at, and returns the token record.
+func (s *Store) ValidateServiceToken(tokenHash string) (*ServiceToken, error) {
+	var t ServiceToken
+	err := s.db.QueryRow(
+		`SELECT id, service_name, namespace, prefix, label, created_by, created_at, last_used_at, revoked
+		 FROM service_tokens WHERE token_hash = $1`,
+		tokenHash,
+	).Scan(&t.ID, &t.ServiceName, &t.Namespace, &t.Prefix, &t.Label, &t.CreatedBy, &t.CreatedAt, &t.LastUsedAt, &t.Revoked)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if t.Revoked {
+		return nil, errors.New("token revoked")
+	}
+	// Best-effort update of last_used_at; ignore errors.
+	s.db.Exec(`UPDATE service_tokens SET last_used_at = NOW() WHERE id = $1`, t.ID)
+	return &t, nil
 }

@@ -1,0 +1,25 @@
+name: Trigger Production Deploy
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  dispatch:
+    name: Notify Konfig repo to deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Send repository_dispatch to Konfig
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          # PAT with 'repo' scope on the Konfig repo (or fine-grained: contents:write on Konfig)
+          token: ${{ secrets.KONFIG_DISPATCH_TOKEN }}
+          repository: ${{ secrets.KONFIG_REPO }}   # e.g. "your-github-username/Konfig"
+          event-type: deploy
+          client-payload: |
+            {
+              "repo": "Konfig-Web-Backend",
+              "tag": "${{ github.event.release.tag_name }}",
+              "url": "${{ github.event.release.html_url }}"
+            }
